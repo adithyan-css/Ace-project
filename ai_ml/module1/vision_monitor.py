@@ -97,7 +97,7 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None, event
         raise RuntimeError("Could not open source")
 
     model = YOLO("yolov8n.pt")
-    interest_names = {"person", "car", "truck", "bus", "motorcycle"}
+    interest_names = {"person", "car", "truck", "bus", "motorcycle","bottle", "backpack"}
     interest_ids = {idx for idx, name in model.names.items() if name in interest_names}
 
     if show_window:
