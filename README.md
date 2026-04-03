@@ -1,314 +1,205 @@
-# ACE Mission Control
+# ACE Recruitment Mission Control
 
-ACE Mission Control is a local, real-time robotics operations stack with integrated AI inference.
+## Project Overview
 
-## Stack
+ACE Recruitment Mission Control is a real-time robotics telemetry platform with a FastAPI backend, React mission dashboard, and AI/ML modules for motor failure prediction, vision zone analysis, and command-language parsing.
 
-- Frontend: React + Vite + Zustand + Recharts + Leaflet
-- Backend: FastAPI + SQLAlchemy + WebSocket broadcast
-- AI Modules:
-  - Motor failure prediction (LSTM + heuristic fallback)
-  - NLP command parsing
-  - Vision anomaly monitor (standalone runtime)
+Core capabilities:
+- Live telemetry ingestion and persistence
+- Real-time WebSocket streaming to dashboard clients
+- AI endpoints for motor, vision, and NLP analysis
+- Command terminal integration with structured parsing
+- Demo simulator for interview and offline verification
 
-## Project Layout
+## Architecture Diagram
 
 ```text
-ace project/
-├── backend/
-│   └── main.py
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── components/
-│   │   └── store/useRobotStore.js
-│   └── package.json
-├── ai_ml/
-│   ├── module1/vision_monitor.py
-│   └── module2/
-│       ├── motor_predictor.py
-│       └── nlp_parser.py
-├── tests/
-├── requirements.txt
-├── requirements_backend.txt
-├── Dockerfile
-└── .env
++----------------------+        +--------------------------+
+|  AI/ML Modules       |        |  Robot / Demo Telemetry  |
+|  - motor_predictor   |        |  POST /telemetry         |
+|  - vision_monitor    |        +-------------+------------+
+|  - nlp_parser        |                      |
++----------+-----------+                      v
+           |                         +-----------------------+
+           | API calls               | FastAPI Backend       |
+           +-----------------------> | - REST endpoints      |
+                                     | - SQLAlchemy + DB     |
+                                     | - WebSocket broadcast |
+                                     +----------+------------+
+                                                |
+                                  WS /ws, WS /ws/telemetry
+                                                |
+                                                v
+                                     +-----------------------+
+                                     | React Frontend        |
+                                     | - Zustand store       |
+                                     | - Telemetry cards     |
+                                     | - Charts + Map + AI   |
+                                     | - Command terminal    |
+                                     +-----------------------+
 ```
 
-## End-to-End Data Flow
+## Quick Start (4 Steps)
 
-1. Robot telemetry is sent to `POST /telemetry`.
-2. Backend validates robot handshake credentials, stores telemetry, and broadcasts to WebSocket clients.
-3. Frontend consumes WebSocket events to update cards, charts, map, alerts, and terminal in real time.
-4. Operator commands are sent from frontend terminal to `POST /command`.
-5. Backend parses commands (basic parser + NLP parser output) and broadcasts command events.
-6. Frontend calls AI APIs (`/ai/parse-command`, `/ai/predict/motor`) to display AI insights and risk alerts.
-
-## API Contract
-
-Base URL: `http://localhost:8000`
-
-### Health
-
-- `GET /health`
-- Response:
-
-```json
-{
-  "status": "ok",
-  "service": "ace-backend",
-  "timestamp": "2026-04-03T13:45:10.123456+00:00",
-  "modules": {
-    "nlp": true,
-    "motor_predictor": true,
-    "motor_model_loaded": false
-  }
-}
-```
-
-### Telemetry
-
-- `POST /telemetry`
-- Request:
-
-```json
-{
-  "robot_id": "rover-cam-01",
-  "secret_key": "ace-secret-key-123",
-  "speed": 10.2,
-  "battery": 82.3,
-  "latitude": 12.9716,
-  "longitude": 77.5946,
-  "motor_temp": 56.0,
-  "current": 9.2,
-  "pitch": 1.2,
-  "roll": -0.8,
-  "yaw": 102.0,
-  "extra": {"rpm": 2400, "vibration": 0.14}
-}
-```
-
-- Response:
-
-```json
-{
-  "status": "ok",
-  "telemetry_id": 101,
-  "robot_id": "rover-cam-01"
-}
-```
-
-- `GET /telemetry/{robot_id}?limit=100`
-- Response: list of telemetry rows ordered newest first.
-
-### Distance
-
-- `GET /distance/{robot_id}`
-- Response:
-
-```json
-{
-  "status": "ok",
-  "robot_id": "rover-cam-01",
-  "distance_meters": 1265.133,
-  "distance_km": 1.265133,
-  "gps_points_used": 87,
-  "period_hours": 24
-}
-```
-
-### Fleet Summary
-
-- `GET /robots`
-- Response:
-
-```json
-{
-  "status": "ok",
-  "count": 2,
-  "robots": [
-    {
-      "robot_id": "rover-arm-02",
-      "timestamp": "2026-04-03T13:44:59.222222+00:00",
-      "battery": 72.1,
-      "speed": 8.4
-    }
-  ]
-}
-```
-
-### Commands
-
-- `POST /command`
-- Request:
-
-```json
-{
-  "robot_id": "rover-cam-01",
-  "secret_key": "ace-secret-key-123",
-  "command": "return to base immediately"
-}
-```
-
-- Response:
-
-```json
-{
-  "status": "queued",
-  "type": "command",
-  "timestamp": "2026-04-03T13:45:41.101010+00:00",
-  "robot_id": "rover-cam-01",
-  "command": "return to base immediately",
-  "parsed": {"raw": "return to base immediately", "action": "return", "args": ["to", "base", "immediately"]},
-  "nlp": {
-    "issues": [{"component": "Battery", "description": "...", "severity": "high"}],
-    "directives": [{"action": "Return to base immediately", "target": "Navigation", "urgency": "high"}],
-    "overall_status": "EMERGENCY",
-    "mode": "rule-based"
-  }
-}
-```
-
-### AI APIs
-
-- `POST /ai/parse-command`
-- Request:
-
-```json
-{"text": "switch to safe mode immediately"}
-```
-
-- Response:
-
-```json
-{
-  "status": "ok",
-  "text": "switch to safe mode immediately",
-  "parsed": {
-    "issues": [],
-    "directives": [{"action": "Engage autonomous safe mode", "target": "Control System", "urgency": "high"}],
-    "overall_status": "SAFE",
-    "mode": "rule-based"
-  }
-}
-```
-
-- `POST /ai/predict/motor`
-- Request:
-
-```json
-{
-  "robot_id": "rover-cam-01",
-  "secret_key": "ace-secret-key-123",
-  "history": [
-    {"current": 19.8, "rpm": 1850, "temperature": 81.3, "vibration": 0.26}
-  ]
-}
-```
-
-- Response:
-
-```json
-{
-  "status": "ok",
-  "robot_id": "rover-cam-01",
-  "failure_probability": 0.379,
-  "risk_level": "medium",
-  "samples_used": 1
-}
-```
-
-### WebSocket
-
-- `WS /ws`
-- Server pushes:
-  - `snapshot`
-  - `telemetry`
-  - `command`
-  - `ai_insight`
-- Client may send:
-
-```json
-{"type": "ping"}
-```
-
-```json
-{
-  "type": "command",
-  "robot_id": "rover-cam-01",
-  "secret_key": "ace-secret-key-123",
-  "command": "stop"
-}
-```
-
-## Local Run Guide
-
-### 1) Backend
-
-From project root:
+1. Install dependencies
 
 ```bash
 pip install -r requirements_backend.txt
-cd backend
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+cd frontend
+npm install
+cd ..
 ```
 
-Optional environment variables:
+2. Train and save motor model artifacts
 
-- `DATABASE_URL` (default `sqlite:///./data/telemetry.db`)
-- `ALLOWED_ORIGINS` (comma-separated, default `*`)
+```bash
+python ai_ml/module2/train_and_save.py
+```
 
-### 2) Frontend
+3. Start backend
 
-From project root:
+```bash
+cd backend
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+4. Start frontend
 
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
 
-Optional frontend env:
+After startup:
+- Backend docs: http://localhost:8000/docs
+- Frontend app: http://localhost:5173
 
-- `VITE_API_URL` (default `http://localhost:8000`)
-- `VITE_WS_URL` (default `ws://localhost:8000/ws`)
+## API Reference
 
-### 3) Demo Telemetry
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | /health | Service health, DB status, model availability, websocket counts |
+| POST | /telemetry | Ingest robot telemetry with handshake auth |
+| GET | /telemetry/{robot_id} | Get recent telemetry history |
+| GET | /api/telemetry/latest/{robot_id} | Get latest telemetry sample |
+| GET | /distance/{robot_id} | Compute 24h traveled distance |
+| GET | /robots | Latest summary per robot |
+| POST | /command | Command ingest + parse + broadcast |
+| POST | /api/command | Alias command endpoint |
+| POST | /ai/predict/motor | Motor failure prediction |
+| POST | /api/ai/motor-predict | Alias motor prediction endpoint |
+| POST | /ai/parse-command | NLP command parsing |
+| POST | /api/ai/nlp-parse | Alias NLP parsing endpoint |
+| POST | /api/ai/vision-analyze | Vision zone/anomaly API |
+| GET | /demo/start | Start telemetry simulator |
+| GET | /demo/stop | Stop telemetry simulator |
+| WS | /ws | Event bus (snapshot, telemetry, command, ai_insight) |
+| WS | /ws/telemetry | 1-second telemetry tick stream |
 
-Start simulation stream:
+## AI/ML Modules
 
+### 1) Vision Monitor
+File: ai_ml/module1/vision_monitor.py
+
+Run:
 ```bash
-curl http://localhost:8000/demo/start
+python ai_ml/module1/vision_monitor.py --source 0
 ```
 
-The frontend dashboard will auto-connect and update in real time.
+What it does:
+- YOLOv8 object tracking
+- Polygon ROI breach detection
+- ENTRY/EXIT duration logging to JSONL
 
-### 4) AI Modules (Standalone)
+### 2) Motor Predictor
+File: ai_ml/module2/motor_predictor.py
 
-Motor model training/artifacts:
-
+Run training + save artifacts:
 ```bash
-cd ai_ml/module2
-python motor_predictor.py
+python ai_ml/module2/train_and_save.py
 ```
 
-NLP parser local run:
+Artifacts produced:
+- ai_ml/module2/motor_lstm.pt
+- ai_ml/module2/scaler_mean.npy
+- ai_ml/module2/scaler_scale.npy
+- ai_ml/module2/training_curve.png
 
+### 3) NLP Parser
+File: ai_ml/module2/nlp_parser.py
+
+Run:
 ```bash
-cd ai_ml/module2
-python nlp_parser.py
+python ai_ml/module2/nlp_parser.py
 ```
 
-Vision restricted-zone monitor:
+What it does:
+- Extracts issues/directives from command text
+- Produces overall status (SAFE/CAUTION/ALERT/EMERGENCY)
 
+## Frontend Features
+
+- Componentized dashboard layout with shared Zustand state
+- Live telemetry cards (speed, battery, motor temp, current, IMU)
+- Real-time chart updates and GPS map path
+- AI insights panel fed from backend events
+- Alerts panel with live threshold-triggered backend alerts
+- Command terminal connected to backend command/NLP/motor APIs
+- WebSocket reconnect handling and graceful failure display
+
+## Environment Variables
+
+### Backend (backend/.env)
+
+| Variable | Description | Example |
+|---|---|---|
+| DATABASE_URL | SQLAlchemy DB URL | postgresql://... |
+| HOST | Backend host | 127.0.0.1 |
+| PORT | Backend port | 8000 |
+| ALLOWED_ORIGINS | CORS origins | http://localhost:5173 |
+
+### Frontend (frontend/.env)
+
+| Variable | Description | Example |
+|---|---|---|
+| VITE_API_URL | REST API base URL | http://localhost:8000 |
+| VITE_WS_URL | WebSocket URL | ws://localhost:8000/ws |
+
+## Docker Deployment
+
+Build image:
 ```bash
-cd ai_ml/module1
-python vision_monitor.py --source 0
+docker build -t ace-backend .
 ```
 
-## Quality Notes
+Run container:
+```bash
+docker run -d -p 8000:8000 --name ace-backend \
+  -e DATABASE_URL="postgresql://..." \
+  -e PORT=8000 \
+  ace-backend
+```
 
-- No frontend mock telemetry is used after initialization.
-- Live state is derived from backend REST + WebSocket messages.
-- Backend handles malformed WebSocket payloads and invalid command inputs safely.
-- Fast path tests: `pytest tests -m "not slow" -q`.
+Health check:
+- http://localhost:8000/health
+
+## Interview Talking Points
+
+- Designed dual websocket strategy: event bus on /ws and fixed-rate telemetry stream on /ws/telemetry.
+- Implemented fallback-safe motor prediction so service stays available even when model artifacts are missing.
+- Added explicit startup warnings and training bootstrap to guarantee deterministic interview setup.
+- Kept backend deploy-light by splitting AI dependencies into requirements_ai.txt.
+- Built frontend as a state-driven architecture (Zustand) to isolate transport, state, and presentation concerns.
+- Enforced additive backend evolution with alias routes for backward compatibility during refactor.
+
+## Verification Commands
+
+```bash
+python ai_ml/module2/train_and_save.py
+pytest tests/ -v
+pytest tests/ -v -m "not slow"
+```
+
+```bash
+make help
+```

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+const API_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/telemetry'
 
 const ROBOT_KEYS = {
   'rover-cam-01': 'ace-secret-key-123',
@@ -290,6 +290,29 @@ export const useRobotStore = create((set, get) => ({
           })
         }
 
+        if (payload.type === 'telemetry_tick') {
+          if (payload.robots) {
+            Object.entries(payload.robots).forEach(([robotId, telemetry]) => {
+              get().upsertRobotTelemetry(robotId, telemetry)
+            })
+          }
+
+          if (Array.isArray(payload.alerts)) {
+            set({ alerts: payload.alerts.slice(0, 10) })
+          }
+
+          if (Array.isArray(payload.ai_insights)) {
+            const mapped = payload.ai_insights.map((item, idx) => ({
+              id: item.id || Date.now() + idx,
+              type: item.insight?.source || item.type || 'prediction',
+              message: item.insight?.message || item.message || 'AI event',
+              severity: toSeverity(item.insight?.severity || item.severity),
+              timestamp: item.timestamp || new Date().toISOString(),
+            }))
+            set({ aiInsights: mapped.slice(0, 20) })
+          }
+        }
+
         if (payload.type === 'command') {
           get().addTerminalLine({
             type: 'success',
@@ -392,7 +415,7 @@ export const useRobotStore = create((set, get) => ({
         throw new Error(`No key configured for ${selectedRobot.robotId}`)
       }
 
-      const response = await fetch(`${API_URL}/command`, {
+      const response = await fetch(`${API_URL}/api/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -414,7 +437,7 @@ export const useRobotStore = create((set, get) => ({
         timestamp: new Date(result.timestamp || Date.now()).toLocaleTimeString(),
       })
 
-      const nlpResponse = await fetch(`${API_URL}/ai/parse-command`, {
+      const nlpResponse = await fetch(`${API_URL}/api/ai/nlp-parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: command }),
@@ -444,7 +467,7 @@ export const useRobotStore = create((set, get) => ({
           },
         ],
       }
-      const predictResponse = await fetch(`${API_URL}/ai/predict/motor`, {
+      const predictResponse = await fetch(`${API_URL}/api/ai/motor-predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(predictionBody),

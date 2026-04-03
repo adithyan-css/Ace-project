@@ -44,7 +44,7 @@ const MapView = () => {
     setMapKey((prev) => prev + 1)
   }, [selectedRobotId])
 
-  const position = [selectedRobot?.location.lat || 37.7749, selectedRobot?.location.lng || -122.4194]
+  const position = [selectedRobot?.location.lat || 12.9716, selectedRobot?.location.lng || 77.5946]
   const pathPositions = selectedRobot?.path?.map((p) => [p[0], p[1]]) || []
 
   return (

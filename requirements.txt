@@ -9,3 +9,5 @@ pandas
 scikit-learn
 matplotlib
 requests
+psycopg[binary]==3.2.13
+python-dotenv

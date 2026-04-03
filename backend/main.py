@@ -3,14 +3,20 @@ import json
 import math
 import os
 import random
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Generator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, desc, func
+from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, desc, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+try:
+    load_dotenv = __import__("dotenv").load_dotenv
+except Exception:
+    load_dotenv = None
 
 try:
     from ai_ml.module2 import nlp_parser
@@ -32,8 +38,35 @@ try:
 except Exception:
     motor_predictor = None
 
+try:
+    from ai_ml.module1 import vision_monitor
+except Exception:
+    vision_monitor = None
+
+try:
+    from backend.ai.inference import risk_label as ai_risk_label
+    from backend.ai.inference import severity_from_risk, summarize_vision
+    from backend.services.alert_rules import evaluate_telemetry_alerts
+    from backend.websocket.streaming import build_telemetry_tick
+except Exception:
+    from ai.inference import risk_label as ai_risk_label
+    from ai.inference import severity_from_risk, summarize_vision
+    from services.alert_rules import evaluate_telemetry_alerts
+    from websocket.streaming import build_telemetry_tick
+
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/telemetry.db")
+if load_dotenv:
+    base_dir = Path(__file__).resolve().parent
+    load_dotenv(base_dir / ".env", override=False)
+    load_dotenv(base_dir.parent / ".env", override=False)
+    DATABASE_URL = os.getenv("DATABASE_URL", DATABASE_URL)
+
+HOST = os.getenv("HOST", "127.0.0.1")
+PORT = int(os.getenv("PORT", "8000"))
+
+if DATABASE_URL.startswith("postgresql://") and "+" not in DATABASE_URL.split("://", 1)[0]:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 VALID_ROBOT_CREDENTIALS = {
     "rover-cam-01": "ace-secret-key-123",
@@ -126,6 +159,9 @@ app.add_middleware(
 latest_by_robot: Dict[str, Dict[str, Any]] = {}
 recent_commands: List[Dict[str, Any]] = []
 demo_task: Optional[asyncio.Task] = None
+telemetry_stream_task: Optional[asyncio.Task] = None
+active_alerts: List[Dict[str, Any]] = []
+ai_insights: List[Dict[str, Any]] = []
 
 
 class MotorReading(BaseModel):
@@ -151,6 +187,19 @@ class AICommandIn(BaseModel):
     command: str
 
 
+class VisionObjectIn(BaseModel):
+    id: Optional[str] = None
+    x: float
+    y: float
+
+
+class VisionAnalyzeIn(BaseModel):
+    robot_id: str
+    secret_key: str
+    objects: List[VisionObjectIn] = Field(default_factory=list)
+    roi_polygon: List[List[float]] = Field(default_factory=list)
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
@@ -161,9 +210,31 @@ def get_db() -> Generator[Session, None, None]:
 
 @app.on_event("startup")
 def startup() -> None:
+    global telemetry_stream_task
     if DATABASE_URL.startswith("sqlite"):
         os.makedirs("data", exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    if telemetry_stream_task is None or telemetry_stream_task.done():
+        telemetry_stream_task = asyncio.create_task(telemetry_stream_loop())
+
+    artifacts_dir = Path(__file__).resolve().parent.parent / "ai_ml" / "module2"
+    model_file = artifacts_dir / "motor_lstm.pt"
+    if not model_file.exists():
+        print("\n" + "=" * 72)
+        print("⚠️  WARNING: motor_lstm.pt not found.")
+        print("Motor predictions will use heuristic fallback.")
+        print("Run: python ai_ml/module2/train_and_save.py")
+        print("Then restart the backend.")
+        print("=" * 72 + "\n")
+    elif motor_service.model is not None:
+        print("✅ Motor LSTM model loaded successfully")
+    else:
+        print("\n" + "=" * 72)
+        print("⚠️  WARNING: motor_lstm.pt exists but could not be loaded.")
+        print("Motor predictions will use heuristic fallback.")
+        print("Run: python ai_ml/module2/train_and_save.py")
+        print("Then restart the backend.")
+        print("=" * 72 + "\n")
 
 
 def now_utc() -> datetime:
@@ -310,6 +381,14 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+telemetry_manager = ConnectionManager()
+
+
+async def telemetry_stream_loop() -> None:
+    while True:
+        message = build_telemetry_tick(latest_by_robot, active_alerts, ai_insights, recent_commands)
+        await telemetry_manager.broadcast(message)
+        await asyncio.sleep(1.0)
 
 
 async def broadcast_snapshot() -> None:
@@ -360,6 +439,49 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
         "yaw": row.yaw,
     }
     latest_by_robot[row.robot_id] = latest_payload
+    generated_alerts = evaluate_telemetry_alerts(row.robot_id, latest_payload)
+    if generated_alerts:
+        active_alerts.extend(generated_alerts)
+        if len(active_alerts) > 500:
+            del active_alerts[:-500]
+
+    vision_objects = payload.extra.get("vision_objects") if isinstance(payload.extra, dict) else None
+    if isinstance(vision_objects, list):
+        polygon = payload.extra.get("roi_polygon") if isinstance(payload.extra.get("roi_polygon"), list) else [[120, 120], [560, 120], [620, 420], [140, 420]]
+        inside_count = 0
+        normalized_objects: List[Dict[str, float]] = []
+        for item in vision_objects:
+            if not isinstance(item, dict):
+                continue
+            if "x" not in item or "y" not in item:
+                continue
+            x = float(item.get("x", 0.0))
+            y = float(item.get("y", 0.0))
+            normalized_objects.append({"x": x, "y": y})
+            if vision_monitor:
+                try:
+                    if vision_monitor.point_inside_polygon(x, y, polygon):
+                        inside_count += 1
+                except Exception:
+                    pass
+        if normalized_objects:
+            vision_summary = summarize_vision(normalized_objects, inside_count)
+            vision_severity = "danger" if vision_summary["status"] == "critical" else "warning" if vision_summary["status"] == "warning" else "info"
+            vision_insight = {
+                "id": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "type": "ai_insight",
+                "timestamp": now_iso(),
+                "robot_id": row.robot_id,
+                "insight": {
+                    "source": "vision_monitor",
+                    "severity": vision_severity,
+                    "message": f"Telemetry vision score {vision_summary['anomaly_score']} ({vision_summary['status']}).",
+                },
+            }
+            ai_insights.append(vision_insight)
+            if len(ai_insights) > 500:
+                del ai_insights[:-500]
+            await manager.broadcast(vision_insight)
 
     await manager.broadcast(
         {
@@ -369,6 +491,9 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
             "robots": latest_by_robot,
         }
     )
+
+    for alert in generated_alerts:
+        await manager.broadcast(alert)
 
     return {"status": "ok", "telemetry_id": row.id, "robot_id": row.robot_id}
 
@@ -387,6 +512,36 @@ async def get_telemetry(
         .all()
     )
     return rows
+
+
+@app.get("/api/telemetry/latest/{robot_id}")
+async def get_latest_telemetry(robot_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    row = (
+        db.query(Telemetry)
+        .filter(Telemetry.robot_id == robot_id)
+        .order_by(desc(Telemetry.timestamp))
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="No telemetry found for robot")
+
+    return {
+        "status": "ok",
+        "telemetry": {
+            "id": row.id,
+            "robot_id": row.robot_id,
+            "timestamp": row.timestamp.isoformat(),
+            "speed": row.speed,
+            "battery": row.battery,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "motor_temp": row.motor_temp,
+            "current": row.current,
+            "pitch": row.pitch,
+            "roll": row.roll,
+            "yaw": row.yaw,
+        },
+    }
 
 
 @app.get("/distance/{robot_id}")
@@ -438,6 +593,23 @@ async def post_command(payload: CommandIn) -> Dict[str, Any]:
     if len(recent_commands) > 500:
         del recent_commands[:-500]
 
+    if nlp_result:
+        insight = {
+            "id": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "type": "ai_insight",
+            "timestamp": now_iso(),
+            "robot_id": payload.robot_id,
+            "insight": {
+                "source": "nlp_parser",
+                "severity": severity_from_risk(nlp_result.get("overall_status", "low")),
+                "message": f"NLP overall status: {nlp_result.get('overall_status', 'SAFE')}",
+            },
+        }
+        ai_insights.append(insight)
+        if len(ai_insights) > 500:
+            del ai_insights[:-500]
+        await manager.broadcast(insight)
+
     await manager.broadcast(command_event)
     await broadcast_snapshot()
     return {"status": "queued", **command_event}
@@ -477,13 +649,7 @@ def _rows_from_payload(history: List[MotorReading]) -> List[List[float]]:
 
 
 def _risk_label(prob: float) -> str:
-    if prob >= 0.8:
-        return "critical"
-    if prob >= 0.6:
-        return "high"
-    if prob >= 0.35:
-        return "medium"
-    return "low"
+    return ai_risk_label(prob)
 
 
 @app.post("/ai/predict/motor")
@@ -514,6 +680,9 @@ async def ai_predict_motor(payload: MotorPredictIn, db: Session = Depends(get_db
             "message": f"Predicted failure probability {probability * 100:.1f}% ({risk}).",
         },
     }
+    ai_insights.append(insight_event)
+    if len(ai_insights) > 500:
+        del ai_insights[:-500]
     await manager.broadcast(insight_event)
     return response
 
@@ -540,17 +709,85 @@ async def ai_parse_command(payload: NLPParseIn) -> Dict[str, Any]:
     }
 
 
-@app.get("/health")
-async def health() -> Dict[str, Any]:
+@app.post("/api/ai/motor-predict")
+async def api_motor_predict(payload: MotorPredictIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return await ai_predict_motor(payload, db)
+
+
+@app.post("/api/ai/nlp-parse")
+async def api_nlp_parse(payload: NLPParseIn) -> Dict[str, Any]:
+    return await ai_parse_command(payload)
+
+
+@app.post("/api/command")
+async def api_command(payload: CommandIn) -> Dict[str, Any]:
+    return await post_command(payload)
+
+
+@app.post("/api/ai/vision-analyze")
+async def api_vision_analyze(payload: VisionAnalyzeIn) -> Dict[str, Any]:
+    validate_handshake(payload.robot_id, payload.secret_key)
+
+    polygon = payload.roi_polygon
+    if not polygon:
+        polygon = [[120, 120], [560, 120], [620, 420], [140, 420]]
+
+    inside_count = 0
+    for obj in payload.objects:
+        if vision_monitor:
+            try:
+                if vision_monitor.point_inside_polygon(obj.x, obj.y, polygon):
+                    inside_count += 1
+            except Exception:
+                pass
+        else:
+            xs = [p[0] for p in polygon]
+            ys = [p[1] for p in polygon]
+            if min(xs) <= obj.x <= max(xs) and min(ys) <= obj.y <= max(ys):
+                inside_count += 1
+
+    summary = summarize_vision([o.model_dump() for o in payload.objects], inside_count)
+    severity = "danger" if summary["status"] == "critical" else "warning" if summary["status"] == "warning" else "info"
+    insight = {
+        "id": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "type": "ai_insight",
+        "timestamp": now_iso(),
+        "robot_id": payload.robot_id,
+        "insight": {
+            "source": "vision_monitor",
+            "severity": severity,
+            "message": f"Vision anomaly score {summary['anomaly_score']} ({summary['status']}).",
+        },
+    }
+    ai_insights.append(insight)
+    if len(ai_insights) > 500:
+        del ai_insights[:-500]
+    await manager.broadcast(insight)
+
     return {
         "status": "ok",
-        "service": "ace-backend",
+        "robot_id": payload.robot_id,
+        **summary,
+    }
+
+
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    db_status = "connected"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        db_status = f"error: {exc}"
+
+    return {
+        "status": "ok",
         "timestamp": now_iso(),
-        "modules": {
-            "nlp": nlp_parser is not None,
-            "motor_predictor": motor_service.enabled,
-            "motor_model_loaded": motor_service.model is not None,
-        },
+        "database": db_status,
+        "motor_model_loaded": motor_service.model is not None,
+        "nlp_parser_available": nlp_parser is not None,
+        "active_websocket_connections": len(manager.active_connections) + len(telemetry_manager.active_connections),
+        "demo_running": bool(demo_task is not None and not demo_task.done()),
     }
 
 
@@ -617,6 +854,9 @@ async def demo_loop() -> None:
         db = SessionLocal()
         try:
             await post_telemetry(payload, db)
+        except Exception as exc:
+            print(f"Demo loop stopped due to error: {exc}")
+            break
         finally:
             db.close()
 
@@ -626,10 +866,22 @@ async def demo_loop() -> None:
 @app.get("/demo/start")
 async def demo_start() -> Dict[str, str]:
     global demo_task
+    Base.metadata.create_all(bind=engine)
     if demo_task is None or demo_task.done():
         demo_task = asyncio.create_task(demo_loop())
         return {"status": "started"}
     return {"status": "already_running"}
+
+
+@app.get("/demo/stop")
+async def demo_stop() -> Dict[str, str]:
+    global demo_task
+    if demo_task is not None and not demo_task.done():
+        demo_task.cancel()
+        demo_task = None
+        return {"status": "stopped"}
+    demo_task = None
+    return {"status": "not_running"}
 
 
 @app.websocket("/ws")
@@ -677,6 +929,29 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
+
+
+@app.websocket("/ws/telemetry")
+async def websocket_telemetry_endpoint(websocket: WebSocket) -> None:
+    await telemetry_manager.connect(websocket)
+    await websocket.send_json(build_telemetry_tick(latest_by_robot, active_alerts, ai_insights, recent_commands))
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "message": "Invalid JSON payload"})
+                continue
+
+            if payload.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": now_iso()})
+    except WebSocketDisconnect:
+        telemetry_manager.disconnect(websocket)
+    except Exception:
+        telemetry_manager.disconnect(websocket)
 
 
 """
