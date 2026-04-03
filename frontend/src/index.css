@@ -119,10 +119,6 @@ body {
   animation: blink 1s step-end infinite;
 }
 
-.leaflet-layer {
-  filter: brightness(0.7) contrast(1.2) saturate(0.8);
-}
-
 @keyframes slideIn {
   from {
     opacity: 0;
@@ -187,4 +183,12 @@ body {
 .status-dot.danger {
   background: var(--color-danger);
   box-shadow: 0 0 10px var(--color-danger);
+}
+
+.leaflet-container {
+  background: #0B0F1A !important;
+}
+
+.leaflet-tile {
+  filter: brightness(0.7) grayscale(0.2) !important;
 }
