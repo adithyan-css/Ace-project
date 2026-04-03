@@ -11,6 +11,7 @@ frontend/.env
 
 *.log
 breach_log.jsonl
+data/
 
 yolov8n.pt
 yolo_basic.py
