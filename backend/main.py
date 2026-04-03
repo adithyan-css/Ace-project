@@ -1,16 +1,18 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import random
 from pathlib import Path
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Generator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, desc, func, text
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, create_engine, desc, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 try:
@@ -73,6 +75,12 @@ VALID_ROBOT_CREDENTIALS = {
     "rover-arm-02": "ace-secret-key-456",
 }
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("ace.backend")
+
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
@@ -86,6 +94,9 @@ class Base(DeclarativeBase):
 
 class Telemetry(Base):
     __tablename__ = "telemetry"
+    __table_args__ = (
+        Index("ix_telemetry_robot_ts", "robot_id", "timestamp"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     robot_id: Mapped[str] = mapped_column(String(100), index=True)
@@ -141,7 +152,58 @@ class TelemetryOut(BaseModel):
     extra: Optional[str]
 
 
-app = FastAPI(title="ACE Recruitment Fleet API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global telemetry_stream_task, demo_task
+
+    if DATABASE_URL.startswith("sqlite"):
+        os.makedirs("data", exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+
+    if telemetry_stream_task is None or telemetry_stream_task.done():
+        telemetry_stream_task = asyncio.create_task(telemetry_stream_loop())
+
+    artifacts_dir = Path(__file__).resolve().parent.parent / "ai_ml" / "module2"
+    model_file = artifacts_dir / "motor_lstm.pt"
+    if not model_file.exists():
+        print("\n" + "=" * 72)
+        print("⚠️  WARNING: motor_lstm.pt not found.")
+        print("Motor predictions will use heuristic fallback.")
+        print("Run: python ai_ml/module2/train_and_save.py")
+        print("Then restart the backend.")
+        print("=" * 72 + "\n")
+    elif motor_service.model is not None:
+        print("✅ Motor LSTM model loaded successfully")
+    else:
+        print("\n" + "=" * 72)
+        print("⚠️  WARNING: motor_lstm.pt exists but could not be loaded.")
+        print("Motor predictions will use heuristic fallback.")
+        print("Run: python ai_ml/module2/train_and_save.py")
+        print("Then restart the backend.")
+        print("=" * 72 + "\n")
+
+    try:
+        yield
+    finally:
+        for task in [demo_task, telemetry_stream_task]:
+            if task is not None and not task.done():
+                task.cancel()
+
+        for task in [demo_task, telemetry_stream_task]:
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning("Background task shutdown error: %s", exc)
+
+        demo_task = None
+        telemetry_stream_task = None
+        engine.dispose()
+
+
+app = FastAPI(title="ACE Recruitment Fleet API", version="1.0.0", lifespan=lifespan)
 
 allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
 allowed_origins = [origin.strip() for origin in allowed_origins_raw.split(",") if origin.strip()]
@@ -206,35 +268,6 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
-
-
-@app.on_event("startup")
-def startup() -> None:
-    global telemetry_stream_task
-    if DATABASE_URL.startswith("sqlite"):
-        os.makedirs("data", exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    if telemetry_stream_task is None or telemetry_stream_task.done():
-        telemetry_stream_task = asyncio.create_task(telemetry_stream_loop())
-
-    artifacts_dir = Path(__file__).resolve().parent.parent / "ai_ml" / "module2"
-    model_file = artifacts_dir / "motor_lstm.pt"
-    if not model_file.exists():
-        print("\n" + "=" * 72)
-        print("⚠️  WARNING: motor_lstm.pt not found.")
-        print("Motor predictions will use heuristic fallback.")
-        print("Run: python ai_ml/module2/train_and_save.py")
-        print("Then restart the backend.")
-        print("=" * 72 + "\n")
-    elif motor_service.model is not None:
-        print("✅ Motor LSTM model loaded successfully")
-    else:
-        print("\n" + "=" * 72)
-        print("⚠️  WARNING: motor_lstm.pt exists but could not be loaded.")
-        print("Motor predictions will use heuristic fallback.")
-        print("Run: python ai_ml/module2/train_and_save.py")
-        print("Then restart the backend.")
-        print("=" * 72 + "\n")
 
 
 def now_utc() -> datetime:
@@ -358,16 +391,19 @@ motor_service = MotorInferenceService()
 
 
 class ConnectionManager:
-    def __init__(self) -> None:
+    def __init__(self, manager_name: str) -> None:
+        self.manager_name = manager_name
         self.active_connections: List[WebSocket] = []
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info("%s client connected. active=%d", self.manager_name, len(self.active_connections))
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            logger.info("%s client disconnected. active=%d", self.manager_name, len(self.active_connections))
 
     async def broadcast(self, message: Dict[str, Any]) -> None:
         disconnected: List[WebSocket] = []
@@ -380,8 +416,8 @@ class ConnectionManager:
             self.disconnect(connection)
 
 
-manager = ConnectionManager()
-telemetry_manager = ConnectionManager()
+manager = ConnectionManager("event_ws")
+telemetry_manager = ConnectionManager("telemetry_ws")
 
 
 async def telemetry_stream_loop() -> None:
@@ -439,6 +475,7 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
         "yaw": row.yaw,
     }
     latest_by_robot[row.robot_id] = latest_payload
+    logger.debug("Telemetry stored id=%s robot=%s", row.id, row.robot_id)
     generated_alerts = evaluate_telemetry_alerts(row.robot_id, latest_payload)
     if generated_alerts:
         active_alerts.extend(generated_alerts)
@@ -493,6 +530,7 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
     )
 
     for alert in generated_alerts:
+        logger.info("Alert emitted robot=%s code=%s severity=%s", row.robot_id, alert.get("code"), alert.get("severity"))
         await manager.broadcast(alert)
 
     return {"status": "ok", "telemetry_id": row.id, "robot_id": row.robot_id}
@@ -638,6 +676,7 @@ async def post_command(payload: CommandIn) -> Dict[str, Any]:
         "parsed": parsed,
         "nlp": nlp_result,
     }
+    logger.info("Command received robot=%s cmd=%s", payload.robot_id, payload.command)
     recent_commands.append(command_event)
     if len(recent_commands) > 500:
         del recent_commands[:-500]
@@ -711,6 +750,7 @@ async def ai_predict_motor(payload: MotorPredictIn, db: Session = Depends(get_db
 
     probability = motor_service.predict(rows)
     risk = _risk_label(probability)
+    logger.info("Motor prediction robot=%s risk=%s prob=%.4f", payload.robot_id, risk, probability)
     response = {
         "status": "ok",
         "robot_id": payload.robot_id,
@@ -796,6 +836,13 @@ async def api_vision_analyze(payload: VisionAnalyzeIn) -> Dict[str, Any]:
                 inside_count += 1
 
     summary = summarize_vision([o.model_dump() for o in payload.objects], inside_count)
+    logger.info(
+        "Vision analyze robot=%s objects=%d inside=%d status=%s",
+        payload.robot_id,
+        len(payload.objects),
+        inside_count,
+        summary["status"],
+    )
     severity = "danger" if summary["status"] == "critical" else "warning" if summary["status"] == "warning" else "info"
     insight = {
         "id": int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -918,6 +965,7 @@ async def demo_start() -> Dict[str, str]:
     Base.metadata.create_all(bind=engine)
     if demo_task is None or demo_task.done():
         demo_task = asyncio.create_task(demo_loop())
+        logger.info("Demo loop started")
         return {"status": "started"}
     return {"status": "already_running"}
 
@@ -928,6 +976,7 @@ async def demo_stop() -> Dict[str, str]:
     if demo_task is not None and not demo_task.done():
         demo_task.cancel()
         demo_task = None
+        logger.info("Demo loop stopped")
         return {"status": "stopped"}
     demo_task = None
     return {"status": "not_running"}

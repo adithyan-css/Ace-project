@@ -72,6 +72,28 @@ const mapInsightFromCommand = (commandEvent) => {
   }
 }
 
+const alertsChanged = (existing, incoming) => {
+  if (!Array.isArray(existing) || !Array.isArray(incoming)) return true
+  if (existing.length !== incoming.length) return true
+  for (let i = 0; i < incoming.length; i += 1) {
+    if (existing[i]?.id !== incoming[i]?.id || existing[i]?.timestamp !== incoming[i]?.timestamp) {
+      return true
+    }
+  }
+  return false
+}
+
+const insightsChanged = (existing, incoming) => {
+  if (!Array.isArray(existing) || !Array.isArray(incoming)) return true
+  if (existing.length !== incoming.length) return true
+  for (let i = 0; i < incoming.length; i += 1) {
+    if (existing[i]?.id !== incoming[i]?.id || existing[i]?.timestamp !== incoming[i]?.timestamp) {
+      return true
+    }
+  }
+  return false
+}
+
 export const useRobotStore = create((set, get) => ({
   robots: [],
   selectedRobotId: null,
@@ -298,7 +320,8 @@ export const useRobotStore = create((set, get) => ({
           }
 
           if (Array.isArray(payload.alerts)) {
-            set({ alerts: payload.alerts.slice(0, 10) })
+            const nextAlerts = payload.alerts.slice(0, 10)
+            set((state) => (alertsChanged(state.alerts, nextAlerts) ? { alerts: nextAlerts } : state))
           }
 
           if (Array.isArray(payload.ai_insights)) {
@@ -309,7 +332,8 @@ export const useRobotStore = create((set, get) => ({
               severity: toSeverity(item.insight?.severity || item.severity),
               timestamp: item.timestamp || new Date().toISOString(),
             }))
-            set({ aiInsights: mapped.slice(0, 20) })
+            const nextInsights = mapped.slice(0, 20)
+            set((state) => (insightsChanged(state.aiInsights, nextInsights) ? { aiInsights: nextInsights } : state))
           }
         }
 
@@ -433,9 +457,16 @@ export const useRobotStore = create((set, get) => ({
       const result = await response.json()
       get().addTerminalLine({
         type: 'success',
-        message: `Command accepted: ${result.parsed?.action || command}`,
+        message: `Command accepted for ${selectedRobot.robotId}: ${result.parsed?.action || command}`,
         timestamp: new Date(result.timestamp || Date.now()).toLocaleTimeString(),
       })
+      if (result.nlp?.overall_status) {
+        get().addTerminalLine({
+          type: 'info',
+          message: `NLP status ${result.nlp.overall_status} (${result.nlp.mode || 'rule-based'})`,
+          timestamp: new Date().toLocaleTimeString(),
+        })
+      }
 
       const nlpResponse = await fetch(`${API_URL}/api/ai/nlp-parse`, {
         method: 'POST',
