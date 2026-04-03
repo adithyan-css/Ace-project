@@ -66,6 +66,16 @@ DIRECTIVE_PATTERNS = [
         "target": "Control System",
     },
     {
+        "pattern": "switch to safe mode",
+        "action": "Engage autonomous safe mode",
+        "target": "Control System",
+    },
+    {
+        "pattern": "safe mode",
+        "action": "Engage autonomous safe mode",
+        "target": "Control System",
+    },
+    {
         "pattern": "continue mission",
         "action": "Continue current mission",
         "target": "Operator",
@@ -190,6 +200,14 @@ def parse_transcript(text: str) -> dict:
             pass
 
     issues = extract_issues(text)
+    if not issues and classify_severity(text) == "high":
+        issues.append(
+            {
+                "component": "General",
+                "description": text.strip(),
+                "severity": "high",
+            }
+        )
     directives = extract_directives(text)
     overall = calculate_overall_status(issues)
     return {

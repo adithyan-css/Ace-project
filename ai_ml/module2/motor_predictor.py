@@ -5,13 +5,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 np.random.seed(42)
 torch.manual_seed(42)
 
 
-# Generate synthetic telemetry with realistic normal and failure transitions.
 def generate_synthetic(n=3500):
     t = np.arange(n)
     load = 0.6 + 0.35 * np.sin(t / 45.0)
@@ -36,7 +34,6 @@ def generate_synthetic(n=3500):
     return x.astype(np.float32), y.astype(np.float32)
 
 
-# Convert sensor stream into sequence windows for 5-step-ahead prediction.
 def build_sequences(x, y, seq_len=30, horizon=5):
     xs, ys = [], []
     for i in range(len(x) - seq_len - horizon):
@@ -45,7 +42,6 @@ def build_sequences(x, y, seq_len=30, horizon=5):
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
 
 
-# Define a compact LSTM binary risk predictor.
 class LSTMRegressor(nn.Module):
     def __init__(self, input_size=4, hidden_size=48):
         super().__init__()
@@ -62,14 +58,12 @@ class LSTMRegressor(nn.Module):
         return self.head(out[:, -1, :]).squeeze(1)
 
 
-# Build a text progress bar for live failure probability display.
 def bar(prob):
     blocks = 20
     on = int(round(prob * blocks))
     return "[" + "█" * on + "░" * (blocks - on) + "]"
 
 
-# Create one telemetry sample for a chosen operating mode.
 def synth_row(mode: str, step: int) -> np.ndarray:
     if mode == "normal":
         current = 12.5 + np.random.normal(0, 0.5)
@@ -90,154 +84,158 @@ def synth_row(mode: str, step: int) -> np.ndarray:
     return np.array([current, rpm, temp, vibration], dtype=np.float32)
 
 
-# Generate dataset and split chronologically to avoid temporal leakage.
-print("[1/6] Generating synthetic telemetry...")
-x, y = generate_synthetic(n=4000)
+def prepare_dataloaders(n=4000, seq_len=30, horizon=5, batch_size=32):
+    x, y = generate_synthetic(n=n)
+    split_idx = int(len(x) * 0.8)
+    x_train_raw, x_val_raw = x[:split_idx], x[split_idx:]
+    y_train_raw, y_val_raw = y[:split_idx], y[split_idx:]
 
-split_idx = int(len(x) * 0.8)
-x_train_raw, x_val_raw = x[:split_idx], x[split_idx:]
-y_train_raw, y_val_raw = y[:split_idx], y[split_idx:]
+    scaler = StandardScaler()
+    x_train_scaled = scaler.fit_transform(x_train_raw).astype(np.float32)
+    x_val_scaled = scaler.transform(x_val_raw).astype(np.float32)
 
-# Fit scaler on training portion only, then transform both partitions.
-scaler = StandardScaler()
-x_train_scaled = scaler.fit_transform(x_train_raw).astype(np.float32)
-x_val_scaled = scaler.transform(x_val_raw).astype(np.float32)
+    x_train_seq, y_train_seq = build_sequences(x_train_scaled, y_train_raw, seq_len=seq_len, horizon=horizon)
+    x_val_seq, y_val_seq = build_sequences(x_val_scaled, y_val_raw, seq_len=seq_len, horizon=horizon)
 
-# Build sequence windows for train and validation sets independently.
-print("[2/6] Building sequences...")
-seq_len = 30
-horizon = 5
-x_train_seq, y_train_seq = build_sequences(x_train_scaled, y_train_raw, seq_len=seq_len, horizon=horizon)
-x_val_seq, y_val_seq = build_sequences(x_val_scaled, y_val_raw, seq_len=seq_len, horizon=horizon)
+    train_ds = TensorDataset(torch.tensor(x_train_seq), torch.tensor(y_train_seq))
+    val_ds = TensorDataset(torch.tensor(x_val_seq), torch.tensor(y_val_seq))
 
-# Create dataloaders for mini-batch training and validation.
-train_ds = TensorDataset(torch.tensor(x_train_seq), torch.tensor(y_train_seq))
-val_ds = TensorDataset(torch.tensor(x_val_seq), torch.tensor(y_val_seq))
-train_loader = DataLoader(train_ds, batch_size=32, shuffle=False)
-val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    return train_loader, val_loader, scaler
 
-# Initialize model, optimizer, and BCE objective for probability output.
-model = LSTMRegressor()
-criterion = nn.BCELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-train_losses = []
-val_losses = []
+def train_model(model, train_loader, val_loader, epochs=25, lr=1e-3):
+    criterion = nn.BCELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    train_losses = []
+    val_losses = []
 
-print("[3/6] Training LSTM...")
-epochs = 25
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_running = 0.0
+        train_count = 0
 
-for epoch in range(1, epochs + 1):
-    model.train()
-    train_running = 0.0
-    train_count = 0
+        for xb, yb in train_loader:
+            xb = xb.float()
+            yb = yb.float()
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            optimizer.step()
+            train_running += loss.item() * xb.size(0)
+            train_count += xb.size(0)
 
-    for xb, yb in train_loader:
-        xb = xb.float()
-        yb = yb.float()
+        train_loss = train_running / max(train_count, 1)
 
-        optimizer.zero_grad()
-        pred = model(xb)
-        loss = criterion(pred, yb)
-        loss.backward()
-        optimizer.step()
-        train_running += loss.item() * xb.size(0)
-        train_count += xb.size(0)
+        model.eval()
+        val_running = 0.0
+        val_count = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb = xb.float()
+                yb = yb.float()
+                pred = model(xb)
+                val_loss_batch = criterion(pred, yb)
+                val_running += val_loss_batch.item() * xb.size(0)
+                val_count += xb.size(0)
 
-    train_loss = train_running / max(train_count, 1)
+        val_loss = val_running / max(val_count, 1)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        print(f"Epoch {epoch:2d}/{epochs}  train={train_loss:.4f}  val={val_loss:.4f}")
 
-    # Evaluate after each epoch and report train/validation losses.
+    return train_losses, val_losses
+
+
+def evaluate_rmse(model, val_loader):
     model.eval()
-    val_running = 0.0
-    val_count = 0
+    y_true_all = []
+    y_pred_all = []
     with torch.no_grad():
         for xb, yb in val_loader:
             xb = xb.float()
             yb = yb.float()
-            val_pred = model(xb)
-            val_loss_batch = criterion(val_pred, yb)
-            val_running += val_loss_batch.item() * xb.size(0)
-            val_count += xb.size(0)
+            pred = model(xb)
+            y_true_all.extend(yb.numpy().tolist())
+            y_pred_all.extend(pred.numpy().tolist())
 
-    val_loss = val_running / max(val_count, 1)
+    y_true_np = np.array(y_true_all, dtype=np.float32)
+    y_pred_np = np.array(y_pred_all, dtype=np.float32)
+    return float(np.sqrt(mean_squared_error(y_true_np, y_pred_np)))
 
-    train_losses.append(train_loss)
-    val_losses.append(val_loss)
-    print(f"Epoch {epoch:2d}/{epochs}  train={train_loss:.4f}  val={val_loss:.4f}")
 
-# Compute validation RMSE and print production threshold guidance.
-model.eval()
-with torch.no_grad():
-    y_true_all = []
-    y_pred_all = []
-    for xb, yb in val_loader:
-        xb = xb.float()
-        yb = yb.float()
-        pred = model(xb)
-        y_true_all.extend(yb.numpy().tolist())
-        y_pred_all.extend(pred.numpy().tolist())
+def save_training_curve(train_losses, val_losses, output_path="training_curve.png"):
+    plt.figure(figsize=(8, 4))
+    plt.plot(train_losses, label="train_loss", linewidth=2)
+    plt.plot(val_losses, label="val_loss", linewidth=2)
+    plt.title("Motor Failure LSTM - Training Curve")
+    plt.xlabel("Epoch")
+    plt.ylabel("BCE Loss")
+    plt.legend()
+    plt.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
 
-y_true_np = np.array(y_true_all, dtype=np.float32)
-y_pred_np = np.array(y_pred_all, dtype=np.float32)
-rmse = float(np.sqrt(mean_squared_error(y_true_np, y_pred_np)))
-print(f"[4/6] Validation RMSE: {rmse:.4f}")
-print("(Target: RMSE < 0.30 for production use)")
 
-# Save loss curves so training behavior can be inspected quickly.
-plt.figure(figsize=(8, 4))
-plt.plot(train_losses, label="train_loss", linewidth=2)
-plt.plot(val_losses, label="val_loss", linewidth=2)
-plt.title("Motor Failure LSTM - Training Curve")
-plt.xlabel("Epoch")
-plt.ylabel("BCE Loss")
-plt.legend()
-plt.grid(alpha=0.2)
-plt.tight_layout()
-plt.savefig("training_curve.png", dpi=150)
-print("Plot saved: training_curve.png")
+def run_live_demo(model, scaler, seq_len=30):
+    print("[5/6] LIVE INFERENCE DEMO")
+    timeline = (["normal"] * 60) + (["high_performance"] * 60) + (["failure"] * 120)
+    buffer = []
 
-# Save model and scaler stats for deployment reuse.
-torch.save(model.state_dict(), "motor_lstm.pt")
-np.save("scaler_mean.npy", scaler.mean_.astype(np.float32))
-np.save("scaler_scale.npy", scaler.scale_.astype(np.float32))
-print("Model saved: motor_lstm.pt")
-print("Scaler stats saved: scaler_mean.npy, scaler_scale.npy")
-
-# Run a streaming demo that distinguishes high performance from true failure onset.
-print("[5/6] LIVE INFERENCE DEMO")
-timeline = (["normal"] * 60) + (["high_performance"] * 60) + (["failure"] * 120)
-buffer = []
-
-for i, mode in enumerate(timeline):
-    row = synth_row(mode, i)
-    buffer.append(row)
-    if len(buffer) > seq_len:
-        buffer.pop(0)
-
-    if len(buffer) < seq_len:
-        continue
-
-    window = np.array(buffer, dtype=np.float32)
-    window_norm = scaler.transform(window)
-    x_in = torch.tensor(window_norm[None, :, :], dtype=torch.float32)
-
+    model.eval()
     with torch.no_grad():
-        prob = float(model(x_in).item())
+        for i, mode in enumerate(timeline):
+            row = synth_row(mode, i)
+            buffer.append(row)
+            if len(buffer) > seq_len:
+                buffer.pop(0)
 
-    label = "🚨 FAILURE ALERT" if prob > 0.5 else "✅ Normal"
-    phase = mode.ljust(16)
-    print(f"  [{phase}] Failure Prob: {bar(prob)} {prob * 100:5.1f}%  {label}")
+            if len(buffer) < seq_len:
+                continue
 
-# Print deployment recalibration strategy for the interview deep-dive question.
-print("[6/6] Recalibration Strategy for New Motor Brand")
-print("1) Fine-tune the last two layers on a small labeled dataset from the new motor.")
-print("2) Use transfer learning: keep early temporal feature layers frozen and adapt only the head.")
-print("3) Apply domain adaptation by normalizing features with motor-specific operating ranges.")
-print("   This preserves learned failure patterns while adapting to new baseline behavior.")
+            window = np.array(buffer, dtype=np.float32)
+            window_norm = scaler.transform(window)
+            x_in = torch.tensor(window_norm[None, :, :], dtype=torch.float32)
+            prob = float(model(x_in).item())
+            label = "🚨 FAILURE ALERT" if prob > 0.5 else "✅ Normal"
+            phase = mode.ljust(16)
+            print(f"  [{phase}] Failure Prob: {bar(prob)} {prob * 100:5.1f}%  {label}")
 
-print("Done.")
 
-print("=== LIVE INFERENCE DEMO ===")
-print(f"  [normal  ] Failure Prob: {bar(p_normal)} {p_normal * 100:.1f}%  ✅ Normal")
-print(f"  [failure ] Failure Prob: {bar(p_failure)} {p_failure * 100:.1f}% 🚨 FAILURE ALERT")
-print("[4/4] Done. Saved training_curve.png")
+def main():
+    print("[1/6] Generating synthetic telemetry...")
+    train_loader, val_loader, scaler = prepare_dataloaders(n=4000, seq_len=30, horizon=5, batch_size=32)
+
+    model = LSTMRegressor()
+
+    print("[2/6] Dataloaders ready")
+    print("[3/6] Training LSTM...")
+    train_losses, val_losses = train_model(model, train_loader, val_loader, epochs=25, lr=1e-3)
+
+    rmse = evaluate_rmse(model, val_loader)
+    print(f"[4/6] Validation RMSE: {rmse:.4f}")
+    print("(Target: RMSE < 0.30 for production use)")
+
+    save_training_curve(train_losses, val_losses, output_path="training_curve.png")
+    print("Plot saved: training_curve.png")
+
+    torch.save(model.state_dict(), "motor_lstm.pt")
+    np.save("scaler_mean.npy", scaler.mean_.astype(np.float32))
+    np.save("scaler_scale.npy", scaler.scale_.astype(np.float32))
+    print("Model saved: motor_lstm.pt")
+    print("Scaler stats saved: scaler_mean.npy, scaler_scale.npy")
+
+    run_live_demo(model, scaler, seq_len=30)
+
+    print("[6/6] Recalibration Strategy for New Motor Brand")
+    print("1) Fine-tune the last two layers on a small labeled dataset from the new motor.")
+    print("2) Use transfer learning: keep early temporal feature layers frozen and adapt only the head.")
+    print("3) Apply domain adaptation by normalizing features with motor-specific operating ranges.")
+    print("   This preserves learned failure patterns while adapting to new baseline behavior.")
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
