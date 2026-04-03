@@ -498,6 +498,11 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
     return {"status": "ok", "telemetry_id": row.id, "robot_id": row.robot_id}
 
 
+@app.post("/api/telemetry")
+async def api_post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return await post_telemetry(payload, db)
+
+
 @app.get("/telemetry/{robot_id}", response_model=List[TelemetryOut])
 async def get_telemetry(
     robot_id: str,
@@ -542,6 +547,50 @@ async def get_latest_telemetry(robot_id: str, db: Session = Depends(get_db)) -> 
             "yaw": row.yaw,
         },
     }
+
+
+@app.get("/api/telemetry/latest")
+async def get_latest_telemetry_all(
+    robot_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    if robot_id:
+        return await get_latest_telemetry(robot_id, db)
+
+    latest_ts_subquery = (
+        db.query(Telemetry.robot_id, func.max(Telemetry.timestamp).label("max_ts"))
+        .group_by(Telemetry.robot_id)
+        .subquery()
+    )
+    rows = (
+        db.query(Telemetry)
+        .join(
+            latest_ts_subquery,
+            (Telemetry.robot_id == latest_ts_subquery.c.robot_id)
+            & (Telemetry.timestamp == latest_ts_subquery.c.max_ts),
+        )
+        .order_by(Telemetry.robot_id.asc())
+        .all()
+    )
+
+    latest = [
+        {
+            "id": row.id,
+            "robot_id": row.robot_id,
+            "timestamp": row.timestamp.isoformat(),
+            "speed": row.speed,
+            "battery": row.battery,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "motor_temp": row.motor_temp,
+            "current": row.current,
+            "pitch": row.pitch,
+            "roll": row.roll,
+            "yaw": row.yaw,
+        }
+        for row in rows
+    ]
+    return {"status": "ok", "count": len(latest), "telemetry": latest}
 
 
 @app.get("/distance/{robot_id}")
