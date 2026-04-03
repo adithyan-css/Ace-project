@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r /app/requirements_backend.txt
 
 COPY backend /app/backend
 RUN mkdir -p /app/data
+ENV PORT=8000
 WORKDIR /app/backend
 
 EXPOSE 8000

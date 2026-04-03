@@ -36,6 +36,7 @@ export default function MissionControl() {
   const [connected, setConnected] = useState(false);
   const [robotId, setRobotId] = useState("rover-cam-01");
   const [driveMode, setDriveMode] = useState("Manual");
+  const [lastSeenAt, setLastSeenAt] = useState(null);
   const [telemetry, setTelemetry] = useState({
     speed: 0,
     battery: 100,
@@ -68,6 +69,11 @@ export default function MissionControl() {
 
       ws.onmessage = (event) => {
         const payload = JSON.parse(event.data);
+
+        if (payload.type === "command" && payload.command) {
+          setTerminalLines((prev) => [...prev, `WS command: ${payload.command}`].slice(-60));
+        }
+
         const robots = payload.robots || {};
         const keys = Object.keys(robots);
         if (!keys.length) return;
@@ -76,7 +82,12 @@ export default function MissionControl() {
         if (!active) return;
 
         setRobotId(active.robot_id);
-        setTelemetry(active);
+        setTelemetry((prev) => ({
+          ...prev,
+          ...active,
+          temperature: active.motor_temp ?? active.temperature ?? prev.temperature,
+        }));
+        setLastSeenAt(new Date().toISOString());
         setWsTick((x) => x + 1);
 
         setChartData((prev) => {
@@ -215,7 +226,8 @@ export default function MissionControl() {
       <header style={styles.header}>
         <div>
           <h1 style={styles.h1}>ACE Mission Control</h1>
-          <div style={styles.sub}>Robot: {robotId} | Mode: {driveMode}</div>
+          <div style={styles.sub}>Robot: {robotId} | Mode: {driveMode} | Link: {connected ? "CONNECTED" : "DISCONNECTED"}</div>
+          <div style={styles.subMuted}>Last known update: {lastSeenAt ? new Date(lastSeenAt).toLocaleTimeString() : "No telemetry yet"}</div>
         </div>
         <div style={styles.headerButtons}>
           <button style={styles.primaryBtn} onClick={startDemo}>▶ Start Demo</button>
@@ -350,6 +362,11 @@ const styles = {
     opacity: 0.8,
     marginTop: 4,
   },
+  subMuted: {
+    opacity: 0.7,
+    marginTop: 2,
+    fontSize: 13,
+  },
   headerButtons: {
     display: "flex",
     gap: 10,
@@ -375,11 +392,10 @@ const styles = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(12, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
     gap: 12,
   },
   videoCard: {
-    gridColumn: "span 7",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
@@ -387,35 +403,30 @@ const styles = {
     minHeight: 270,
   },
   metricsCard: {
-    gridColumn: "span 5",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
     padding: 12,
   },
   imuCard: {
-    gridColumn: "span 4",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
     padding: 12,
   },
   chartCard: {
-    gridColumn: "span 8",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
     padding: 12,
   },
   mapCard: {
-    gridColumn: "span 7",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
     padding: 12,
   },
   terminalCard: {
-    gridColumn: "span 5",
     background: "rgba(8,17,34,0.8)",
     border: "1px solid #203250",
     borderRadius: 12,
