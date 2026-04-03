@@ -1,213 +1,226 @@
-# ACE Recruitment Mission Control
+# ACE Mission Control
 
-## Project Overview
+ACE Mission Control is a real-time robotics command and telemetry platform with a FastAPI backend, React dashboard, and AI/ML modules for vision monitoring, motor risk prediction, transcript parsing, and strategy optimization.
 
-ACE Recruitment Mission Control is a real-time robotics telemetry platform with a FastAPI backend, React mission dashboard, and AI/ML modules for motor failure prediction, vision zone analysis, and command-language parsing.
+## Features
 
-Core capabilities:
-- Live telemetry ingestion and persistence
-- Real-time WebSocket streaming to dashboard clients
-- AI endpoints for motor, vision, and NLP analysis
-- Command terminal integration with structured parsing
-- Demo simulator for interview and offline verification
+- Real-time telemetry ingestion with persistent storage
+- WebSocket event bus and 10 Hz telemetry tick stream
+- AI APIs for motor risk, vision zone analysis, NLP parsing, and Monte Carlo strategy optimization
+- Dashboard with telemetry cards, charts, map tracking, alerts, command terminal, and live HUD overlay
+- Built-in demo simulator for local testing and presentations
 
-## Architecture Diagram
+## Project Structure
 
 ```text
-+----------------------+        +--------------------------+
-|  AI/ML Modules       |        |  Robot / Demo Telemetry  |
-|  - motor_predictor   |        |  POST /telemetry         |
-|  - vision_monitor    |        +-------------+------------+
-|  - nlp_parser        |                      |
-+----------+-----------+                      v
-           |                         +-----------------------+
-           | API calls               | FastAPI Backend       |
-           +-----------------------> | - REST endpoints      |
-                                     | - SQLAlchemy + DB     |
-                                     | - WebSocket broadcast |
-                                     +----------+------------+
-                                                |
-                                  WS /ws, WS /ws/telemetry
-                                                |
-                                                v
-                                     +-----------------------+
-                                     | React Frontend        |
-                                     | - Zustand store       |
-                                     | - Telemetry cards     |
-                                     | - Charts + Map + AI   |
-                                     | - Command terminal    |
-                                     +-----------------------+
+backend/                    FastAPI service
+frontend/                   React + Vite dashboard
+ai_ml/module1/              Vision monitor (YOLO + polygon ROI)
+ai_ml/module2/              Motor predictor, NLP parser, strategy optimizer
+tests/                      Backend and AI test suite
+requirements_backend.txt    Backend Python dependencies
+requirements_ai.txt         AI/ML Python dependencies
 ```
 
-## Quick Start (4 Steps)
+## Prerequisites
 
-1. Install dependencies
+- Python 3.11+ (virtual environment recommended)
+- Node.js 18+
+- npm 9+
+
+## Quick Start
+
+1. Install backend dependencies.
 
 ```bash
 pip install -r requirements_backend.txt
+```
+
+2. Install AI dependencies.
+
+```bash
+pip install -r requirements_ai.txt
+```
+
+3. Install frontend dependencies.
+
+```bash
 cd frontend
 npm install
 cd ..
 ```
 
-2. Train and save motor model artifacts
+4. Train and save motor model artifacts (recommended).
 
 ```bash
 python ai_ml/module2/train_and_save.py
 ```
 
-3. Start backend
+5. Start backend.
 
 ```bash
 cd backend
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-4. Start frontend
+6. Start frontend.
 
 ```bash
 cd frontend
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-After startup:
-- Backend docs: http://localhost:8000/docs
-- Frontend app: http://localhost:5173
+7. Start demo telemetry stream.
+
+```bash
+curl http://localhost:8000/demo/start
+```
+
+## URLs
+
+- Frontend: http://localhost:5173
+- API docs: http://localhost:8000/docs
+- Health check: http://localhost:8000/health
+
+## Authentication
+
+Supported authentication modes:
+
+- Payload mode: `robot_id` + `secret_key`
+- Header mode: `X-API-Key` and optional `X-Robot-Id`
+
+Default credentials:
+
+- rover-cam-01 / ace-secret-key-123
+- rover-arm-02 / ace-secret-key-456
 
 ## API Reference
 
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Description |
 |---|---|---|
-| GET | /health | Service health, DB status, model availability, websocket counts |
-| POST | /telemetry | Ingest robot telemetry with handshake auth |
-| GET | /telemetry/{robot_id} | Get recent telemetry history |
-| GET | /api/telemetry/latest/{robot_id} | Get latest telemetry sample |
-| GET | /distance/{robot_id} | Compute 24h traveled distance |
-| GET | /api/telemetry/distance?robot_id=... | Alias 24h traveled distance endpoint |
-| GET | /robots | Latest summary per robot |
-| POST | /command | Command ingest + parse + broadcast |
+| GET | /health | Service health and runtime status |
+| POST | /telemetry | Ingest robot telemetry |
+| POST | /api/telemetry | Alias telemetry ingest endpoint |
+| GET | /telemetry/{robot_id} | Telemetry history for one robot |
+| GET | /api/telemetry/latest/{robot_id} | Latest telemetry sample for one robot |
+| GET | /api/telemetry/latest | Latest telemetry for all robots |
+| GET | /distance/{robot_id} | 24-hour distance using Haversine |
+| GET | /api/telemetry/distance?robot_id=... | Alias distance endpoint |
+| GET | /robots | Fleet summary |
+| POST | /command | Command ingest and parse |
 | POST | /api/command | Alias command endpoint |
-| POST | /ai/predict/motor | Motor failure prediction |
-| POST | /api/ai/motor-predict | Alias motor prediction endpoint |
-| POST | /ai/parse-command | NLP command parsing |
-| POST | /api/ai/nlp-parse | Alias NLP parsing endpoint |
-| POST | /api/ai/vision-analyze | Vision zone/anomaly API |
-| POST | /api/ai/strategy-optimize | Monte Carlo strategy optimization |
-| POST | /api/strategy/optimize | Alias strategy optimization endpoint |
-| GET | /demo/start | Start telemetry simulator |
-| GET | /demo/stop | Stop telemetry simulator |
-| WS | /ws | Event bus (snapshot, telemetry, command, ai_insight) |
-| WS | /ws/telemetry | 10Hz telemetry tick stream |
+| POST | /ai/predict/motor | Motor risk prediction |
+| POST | /api/ai/motor-predict | Alias motor endpoint |
+| POST | /ai/parse-command | NLP parser endpoint |
+| POST | /api/ai/nlp-parse | Alias NLP endpoint |
+| POST | /api/ai/vision-analyze | Vision anomaly and zone analysis |
+| POST | /api/ai/strategy-optimize | Monte Carlo strategy optimizer |
+| POST | /api/strategy/optimize | Alias strategy endpoint |
+| GET | /demo/start | Start simulator |
+| GET | /demo/stop | Stop simulator |
+| WS | /ws | Event WebSocket |
+| WS | /ws/telemetry | 10 Hz telemetry WebSocket |
 
-Auth notes:
-- Payload-based handshake remains supported: `robot_id` + `secret_key` fields.
-- Header-based handshake is also supported for robot clients: `X-API-Key` and optional `X-Robot-Id`.
+## AI Modules
 
-## AI/ML Modules
+### Vision Monitor
 
-### 1) Vision Monitor
-File: ai_ml/module1/vision_monitor.py
+File: `ai_ml/module1/vision_monitor.py`
 
-Run:
 ```bash
 python ai_ml/module1/vision_monitor.py --source 0
 ```
 
-What it does:
-- YOLOv8 object tracking
-- Polygon ROI breach detection
-- ENTRY/EXIT duration logging to JSONL
-- Optional callback payload emission for frontend/websocket integration (`fps`, `zone_breach`, `detections`)
+Capabilities:
 
-### 2) Motor Predictor
-File: ai_ml/module2/motor_predictor.py
+- YOLOv8 person and vehicle detection
+- Editable polygon restricted zone
+- Entry and exit logging with occupancy duration
+- Live FPS and optional callback payloads for integration
 
-Run training + save artifacts:
-```bash
-python ai_ml/module2/train_and_save.py
-```
+### Motor Predictor
 
-Artifacts produced:
-- ai_ml/module2/motor_lstm.pt
-- ai_ml/module2/scaler_mean.npy
-- ai_ml/module2/scaler_scale.npy
-- ai_ml/module2/training_curve.png
+Files:
 
-### 3) NLP Parser
-File: ai_ml/module2/nlp_parser.py
+- `ai_ml/module2/motor_predictor.py`
+- `ai_ml/module2/train_and_save.py`
 
-Run:
-```bash
-python ai_ml/module2/nlp_parser.py
-```
+Artifacts:
 
-What it does:
-- Extracts issues/directives from command text
-- Produces overall status (SAFE/CAUTION/ALERT/EMERGENCY)
+- `ai_ml/module2/motor_lstm.pt`
+- `ai_ml/module2/scaler_mean.npy`
+- `ai_ml/module2/scaler_scale.npy`
+- `ai_ml/module2/training_curve.png`
 
-## Frontend Features
+### NLP Parser
 
-- Componentized dashboard layout with shared Zustand state
-- Live telemetry cards (speed, battery, motor temp, current, IMU)
-- Real-time chart updates and GPS map path
-- AI insights panel fed from backend events
-- Alerts panel with live threshold-triggered backend alerts
-- Command terminal connected to backend command/NLP/motor APIs
-- WebSocket reconnect handling and graceful failure display
+File: `ai_ml/module2/nlp_parser.py`
+
+Supports:
+
+- Gemini API mode (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
+- OpenAI API mode (`OPENAI_API_KEY`)
+- Rule-based fallback mode
+
+### Strategy Optimizer
+
+File: `ai_ml/module2/strategy_optimizer.py`
+
+Inputs:
+
+- Tire age
+- Track temperature
+- Fuel load
+- Safety car probability
+
+Output:
+
+- Best pit lap
+- Expected race time
+- Candidate strategy set
 
 ## Environment Variables
 
-### Backend (backend/.env)
+### Root `.env` and `backend/.env`
 
-| Variable | Description | Example |
-|---|---|---|
-| DATABASE_URL | SQLAlchemy DB URL | postgresql://... |
-| HOST | Backend host | 127.0.0.1 |
-| PORT | Backend port | 8000 |
-| ALLOWED_ORIGINS | CORS origins | http://localhost:5173 |
+| Variable | Description |
+|---|---|
+| DATABASE_URL | Database connection string |
+| HOST | Backend host |
+| PORT | Backend port |
+| ALLOWED_ORIGINS | CORS allowed origins |
+| GOOGLE_API_KEY | Optional Gemini key alias |
+| GEMINI_API_KEY | Optional Gemini API key |
+| OPENAI_API_KEY | Optional OpenAI API key |
 
-### Frontend (frontend/.env)
+### `frontend/.env`
 
-| Variable | Description | Example |
-|---|---|---|
-| VITE_API_URL | REST API base URL | http://localhost:8000 |
-| VITE_WS_URL | WebSocket URL | ws://localhost:8000/ws |
+| Variable | Description |
+|---|---|
+| VITE_API_URL | Backend HTTP base URL |
+| VITE_WS_URL | Backend WebSocket URL |
 
-## Docker Deployment
+## Testing
 
-Build image:
-```bash
-docker build -t ace-backend .
-```
-
-Run container:
-```bash
-docker run -d -p 8000:8000 --name ace-backend \
-  -e DATABASE_URL="postgresql://..." \
-  -e PORT=8000 \
-  ace-backend
-```
-
-Health check:
-- http://localhost:8000/health
-
-## Interview Talking Points
-
-- Designed dual websocket strategy: event bus on /ws and fixed-rate telemetry stream on /ws/telemetry.
-- Implemented fallback-safe motor prediction so service stays available even when model artifacts are missing.
-- Added explicit startup warnings and training bootstrap to guarantee deterministic interview setup.
-- Kept backend deploy-light by splitting AI dependencies into requirements_ai.txt.
-- Built frontend as a state-driven architecture (Zustand) to isolate transport, state, and presentation concerns.
-- Enforced additive backend evolution with alias routes for backward compatibility during refactor.
-
-## Verification Commands
+Run the full suite:
 
 ```bash
-python ai_ml/module2/train_and_save.py
 pytest tests/ -v
+```
+
+Run non-slow tests:
+
+```bash
 pytest tests/ -v -m "not slow"
 ```
 
-```bash
-make help
-```
+## Troubleshooting
+
+- If PostgreSQL driver is unavailable, backend automatically falls back to SQLite.
+- If `motor_lstm.pt` cannot be loaded, backend uses heuristic motor prediction fallback.
+- If camera permission is denied, the dashboard HUD shows simulated vision mode and uses telemetry boxes.
+- If map tiles appear too dark, verify Leaflet tile filters in `frontend/src/index.css`.
+
+## License
+
+Internal project for ACE mission control development and evaluation.
