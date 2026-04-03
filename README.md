@@ -83,6 +83,7 @@ After startup:
 | GET | /telemetry/{robot_id} | Get recent telemetry history |
 | GET | /api/telemetry/latest/{robot_id} | Get latest telemetry sample |
 | GET | /distance/{robot_id} | Compute 24h traveled distance |
+| GET | /api/telemetry/distance?robot_id=... | Alias 24h traveled distance endpoint |
 | GET | /robots | Latest summary per robot |
 | POST | /command | Command ingest + parse + broadcast |
 | POST | /api/command | Alias command endpoint |
@@ -91,10 +92,16 @@ After startup:
 | POST | /ai/parse-command | NLP command parsing |
 | POST | /api/ai/nlp-parse | Alias NLP parsing endpoint |
 | POST | /api/ai/vision-analyze | Vision zone/anomaly API |
+| POST | /api/ai/strategy-optimize | Monte Carlo strategy optimization |
+| POST | /api/strategy/optimize | Alias strategy optimization endpoint |
 | GET | /demo/start | Start telemetry simulator |
 | GET | /demo/stop | Stop telemetry simulator |
 | WS | /ws | Event bus (snapshot, telemetry, command, ai_insight) |
-| WS | /ws/telemetry | 1-second telemetry tick stream |
+| WS | /ws/telemetry | 10Hz telemetry tick stream |
+
+Auth notes:
+- Payload-based handshake remains supported: `robot_id` + `secret_key` fields.
+- Header-based handshake is also supported for robot clients: `X-API-Key` and optional `X-Robot-Id`.
 
 ## AI/ML Modules
 
@@ -110,6 +117,7 @@ What it does:
 - YOLOv8 object tracking
 - Polygon ROI breach detection
 - ENTRY/EXIT duration logging to JSONL
+- Optional callback payload emission for frontend/websocket integration (`fps`, `zone_breach`, `detections`)
 
 ### 2) Motor Predictor
 File: ai_ml/module2/motor_predictor.py

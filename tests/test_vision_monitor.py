@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -53,18 +53,18 @@ class TestBreachDetectionLogic:
         assert 1 in active
 
     def test_no_duplicate_entry_logged(self, tmp_log_path):
-        active = {1: datetime.utcnow().isoformat()}
+        active = {1: datetime.now(timezone.utc).isoformat()}
         before = dict(active)
         vm.apply_entry_exit_logic(1, True, active)
         assert active == before
 
     def test_exit_logged_when_object_leaves(self, tmp_log_path):
-        active = {1: datetime.utcnow().isoformat()}
+        active = {1: datetime.now(timezone.utc).isoformat()}
         vm.apply_entry_exit_logic(1, False, active)
         assert 1 not in active
 
     def test_duration_calculated_correctly(self, tmp_log_path):
-        entered = (datetime.utcnow() - timedelta(seconds=5)).isoformat()
+        entered = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
         active = {1: entered}
         vm.apply_entry_exit_logic(1, False, active)
 
@@ -223,3 +223,27 @@ class TestSyntheticVideoIntegration:
 
         vm.run_monitor(source=str(video_path), frame_skip=1, show_window=False, max_frames=40)
         assert tmp_log_path.exists()
+
+    @pytest.mark.slow
+    def test_event_callback_receives_detection_payload(self, tmp_path, tmp_log_path, monkeypatch):
+        video_path = tmp_path / "test_video.avi"
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        writer = cv2.VideoWriter(str(video_path), fourcc, 30.0, (640, 480))
+        for _ in range(90):
+            frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+            writer.write(frame)
+        writer.release()
+
+        monkeypatch.setattr(vm, "YOLO", DummyYOLO)
+
+        received = []
+
+        def on_event(payload):
+            received.append(payload)
+
+        vm.run_monitor(source=str(video_path), frame_skip=1, show_window=False, max_frames=20, event_callback=on_event)
+
+        assert len(received) > 0
+        assert "fps" in received[-1]
+        assert "zone_breach" in received[-1]
+        assert "detections" in received[-1]

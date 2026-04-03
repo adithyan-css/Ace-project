@@ -45,6 +45,34 @@ class TestHandshakeAuth:
         response = client.post("/telemetry", json=payload)
         assert response.status_code == 200
 
+    def test_header_api_key_auth_accepts_valid_key(self, client, valid_telemetry_payload):
+        payload = dict(valid_telemetry_payload)
+        payload["secret_key"] = "ignored-when-header-present"
+        response = client.post(
+            "/telemetry",
+            json=payload,
+            headers={"X-API-Key": "ace-secret-key-123", "X-Robot-Id": "rover-cam-01"},
+        )
+        assert response.status_code == 200
+
+    def test_header_api_key_auth_rejects_robot_mismatch(self, client, valid_telemetry_payload):
+        response = client.post(
+            "/telemetry",
+            json=valid_telemetry_payload,
+            headers={"X-API-Key": "ace-secret-key-123", "X-Robot-Id": "rover-arm-02"},
+        )
+        assert response.status_code == 401
+
+    def test_header_api_key_auth_rejects_invalid_key(self, client, valid_telemetry_payload):
+        payload = dict(valid_telemetry_payload)
+        payload["secret_key"] = "does-not-matter"
+        response = client.post(
+            "/telemetry",
+            json=payload,
+            headers={"X-API-Key": "wrong", "X-Robot-Id": "rover-cam-01"},
+        )
+        assert response.status_code == 401
+
 
 class TestTelemetryIngestion:
     def test_telemetry_stored_in_db(self, client, valid_telemetry_payload):
@@ -171,6 +199,16 @@ class TestDistanceCalculation:
         data = client.get("/distance/rover-cam-01").json()
         assert abs(data["distance_km"] - (data["distance_meters"] / 1000.0)) < 0.0001
 
+    def test_distance_alias_endpoint(self, client, post_telemetry):
+        assert post_telemetry(12.9716, 77.5946).status_code == 200
+        assert post_telemetry(12.9806, 77.5946).status_code == 200
+
+        response = client.get("/api/telemetry/distance", params={"robot_id": "rover-cam-01"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["robot_id"] == "rover-cam-01"
+        assert data["distance_meters"] > 0
+
 
 class TestCommandEndpoint:
     def test_command_accepted_and_parsed(self, client):
@@ -209,6 +247,33 @@ class TestCommandEndpoint:
             json={"robot_id": "rover-cam-01", "secret_key": "invalid", "command": "/help"},
         )
         assert response.status_code == 401
+
+
+class TestStrategyOptimizerEndpoint:
+    def test_strategy_optimize_alias_endpoint(self, client):
+        payload = {
+            "tire_age": 9,
+            "track_temp": 36,
+            "fuel_load": 30,
+            "safety_car_probability": 0.2,
+        }
+        response = client.post("/api/strategy/optimize", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["optimizer"] == "monte_carlo"
+        assert "best_strategy" in data
+        assert "pit_lap" in data["best_strategy"]
+
+    def test_strategy_optimize_existing_endpoint_still_works(self, client):
+        payload = {
+            "tire_age": 5,
+            "track_temp": 33,
+            "fuel_load": 22,
+        }
+        response = client.post("/api/ai/strategy-optimize", json=payload)
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
 
 
 class TestRobotsEndpoint:

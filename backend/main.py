@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Generator, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import DateTime, Float, Index, Integer, String, Text, create_engine, desc, func, text
@@ -39,6 +39,11 @@ try:
     from ai_ml.module2 import motor_predictor
 except Exception:
     motor_predictor = None
+
+try:
+    from ai_ml.module2 import strategy_optimizer
+except Exception:
+    strategy_optimizer = None
 
 try:
     from ai_ml.module1 import vision_monitor
@@ -81,10 +86,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace.backend")
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-)
+def _make_engine(db_url: str):
+    return create_engine(
+        db_url,
+        connect_args={"check_same_thread": False} if db_url.startswith("sqlite") else {},
+    )
+
+
+def _fallback_sqlite_url() -> str:
+    return "sqlite:///./data/telemetry_fallback.db"
+
+
+def _activate_sqlite_fallback(reason: str, exc: Optional[Exception] = None) -> None:
+    global engine, SessionLocal, DATABASE_URL
+    fallback_url = _fallback_sqlite_url()
+    os.makedirs("data", exist_ok=True)
+    if exc is not None:
+        logger.error("Primary database initialization failed (%s): %s", reason, exc)
+    logger.warning("Falling back to SQLite runtime DB: %s", fallback_url)
+    DATABASE_URL = fallback_url
+    engine = _make_engine(DATABASE_URL)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+try:
+    engine = _make_engine(DATABASE_URL)
+except ModuleNotFoundError as exc:
+    if "psycopg" in str(exc).lower():
+        logger.error("PostgreSQL driver missing. Install with: pip install psycopg[binary]")
+        _activate_sqlite_fallback("missing_psycopg_driver", exc)
+    else:
+        raise
+except Exception as exc:
+    _activate_sqlite_fallback("engine_creation_error", exc)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
@@ -156,9 +191,17 @@ class TelemetryOut(BaseModel):
 async def lifespan(app: FastAPI):
     global telemetry_stream_task, demo_task
 
+    logger.info("Backend startup: initializing with database %s", DATABASE_URL)
     if DATABASE_URL.startswith("sqlite"):
         os.makedirs("data", exist_ok=True)
-    Base.metadata.create_all(bind=engine)
+
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        if DATABASE_URL.startswith("sqlite"):
+            raise
+        _activate_sqlite_fallback("database_connectivity_error", exc)
+        Base.metadata.create_all(bind=engine)
 
     if telemetry_stream_task is None or telemetry_stream_task.done():
         telemetry_stream_task = asyncio.create_task(telemetry_stream_loop())
@@ -262,6 +305,13 @@ class VisionAnalyzeIn(BaseModel):
     roi_polygon: List[List[float]] = Field(default_factory=list)
 
 
+class StrategyOptimizeIn(BaseModel):
+    tire_age: float
+    track_temp: float
+    fuel_load: float
+    safety_car_probability: float = Field(default=0.1, ge=0.0, le=1.0)
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
@@ -282,6 +332,25 @@ def validate_handshake(robot_id: str, secret_key: str) -> None:
     expected_key = VALID_ROBOT_CREDENTIALS.get(robot_id)
     if expected_key is None or expected_key != secret_key:
         raise HTTPException(status_code=401, detail="Unauthorized robot credentials")
+
+
+def validate_request_auth(
+    robot_id: str,
+    payload_secret_key: Optional[str],
+    header_api_key: Optional[str],
+    header_robot_id: Optional[str],
+) -> None:
+    normalized_header_robot_id = header_robot_id.strip() if isinstance(header_robot_id, str) else ""
+    normalized_header_api_key = header_api_key.strip() if isinstance(header_api_key, str) else ""
+
+    if normalized_header_robot_id and normalized_header_robot_id != robot_id:
+        raise HTTPException(status_code=401, detail="Header robot id does not match payload robot id")
+
+    effective_secret = normalized_header_api_key if normalized_header_api_key else payload_secret_key
+    if not effective_secret:
+        raise HTTPException(status_code=401, detail="Missing robot secret key")
+
+    validate_handshake(robot_id, effective_secret)
 
 
 def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -396,6 +465,9 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
 
     async def connect(self, websocket: WebSocket) -> None:
+        if websocket in self.active_connections:
+            logger.warning("%s duplicate websocket connect ignored", self.manager_name)
+            return
         await websocket.accept()
         self.active_connections.append(websocket)
         logger.info("%s client connected. active=%d", self.manager_name, len(self.active_connections))
@@ -424,7 +496,7 @@ async def telemetry_stream_loop() -> None:
     while True:
         message = build_telemetry_tick(latest_by_robot, active_alerts, ai_insights, recent_commands)
         await telemetry_manager.broadcast(message)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.1)
 
 
 async def broadcast_snapshot() -> None:
@@ -439,8 +511,13 @@ async def broadcast_snapshot() -> None:
 
 
 @app.post("/telemetry")
-async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    validate_handshake(payload.robot_id, payload.secret_key)
+async def post_telemetry(
+    payload: TelemetryIn,
+    db: Session = Depends(get_db),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    validate_request_auth(payload.robot_id, payload.secret_key, x_api_key, x_robot_id)
 
     row = Telemetry(
         robot_id=payload.robot_id,
@@ -473,6 +550,7 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
         "pitch": row.pitch,
         "roll": row.roll,
         "yaw": row.yaw,
+        "extra": safe_loads(row.extra),
     }
     latest_by_robot[row.robot_id] = latest_payload
     logger.debug("Telemetry stored id=%s robot=%s", row.id, row.robot_id)
@@ -520,6 +598,22 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
                 del ai_insights[:-500]
             await manager.broadcast(vision_insight)
 
+    vision_boxes = payload.extra.get("vision_boxes") if isinstance(payload.extra, dict) else None
+    if isinstance(vision_boxes, list):
+        breach_count = sum(1 for item in vision_boxes if isinstance(item, dict) and bool(item.get("inside")))
+        await manager.broadcast(
+            {
+                "type": "vision_detection",
+                "timestamp": now_iso(),
+                "robot_id": row.robot_id,
+                "fps": payload.extra.get("fps") if isinstance(payload.extra, dict) else None,
+                "breach": breach_count > 0,
+                "breach_count": breach_count,
+                "polygon": payload.extra.get("roi_polygon") if isinstance(payload.extra, dict) else None,
+                "detections": vision_boxes,
+            }
+        )
+
     await manager.broadcast(
         {
             "type": "telemetry",
@@ -537,8 +631,13 @@ async def post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) ->
 
 
 @app.post("/api/telemetry")
-async def api_post_telemetry(payload: TelemetryIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return await post_telemetry(payload, db)
+async def api_post_telemetry(
+    payload: TelemetryIn,
+    db: Session = Depends(get_db),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    return await post_telemetry(payload, db, x_api_key, x_robot_id)
 
 
 @app.get("/telemetry/{robot_id}", response_model=List[TelemetryOut])
@@ -657,9 +756,21 @@ async def get_distance(robot_id: str, db: Session = Depends(get_db)) -> Dict[str
     }
 
 
+@app.get("/api/telemetry/distance")
+async def api_get_distance(
+    robot_id: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return await get_distance(robot_id, db)
+
+
 @app.post("/command")
-async def post_command(payload: CommandIn) -> Dict[str, Any]:
-    validate_handshake(payload.robot_id, payload.secret_key)
+async def post_command(
+    payload: CommandIn,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    validate_request_auth(payload.robot_id, payload.secret_key, x_api_key, x_robot_id)
 
     parsed = parse_command(payload.command)
     nlp_result = nlp_parser.parse_transcript(payload.command) if nlp_parser else {
@@ -675,6 +786,11 @@ async def post_command(payload: CommandIn) -> Dict[str, Any]:
         "command": payload.command,
         "parsed": parsed,
         "nlp": nlp_result,
+        "execution": {
+            "status": "accepted",
+            "action": parsed.get("action", ""),
+            "confidence": 0.9 if nlp_result.get("mode") == "openai" else 0.75,
+        },
     }
     logger.info("Command received robot=%s cmd=%s", payload.robot_id, payload.command)
     recent_commands.append(command_event)
@@ -741,8 +857,13 @@ def _risk_label(prob: float) -> str:
 
 
 @app.post("/ai/predict/motor")
-async def ai_predict_motor(payload: MotorPredictIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    validate_handshake(payload.robot_id, payload.secret_key)
+async def ai_predict_motor(
+    payload: MotorPredictIn,
+    db: Session = Depends(get_db),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    validate_request_auth(payload.robot_id, payload.secret_key, x_api_key, x_robot_id)
 
     rows = _rows_from_payload(payload.history) if payload.history else _rows_from_db(db, payload.robot_id)
     if not rows:
@@ -756,6 +877,8 @@ async def ai_predict_motor(payload: MotorPredictIn, db: Session = Depends(get_db
         "robot_id": payload.robot_id,
         "failure_probability": round(probability, 4),
         "risk_level": risk,
+        "classification": "impending_failure" if probability >= 0.5 else "normal",
+        "warning": "Impending failure predicted within horizon" if probability >= 0.5 else "No immediate failure predicted",
         "samples_used": len(rows),
     }
 
@@ -791,6 +914,8 @@ async def ai_parse_command(payload: NLPParseIn) -> Dict[str, Any]:
             "mode": "disabled",
         }
 
+    logger.info("NLP parse triggered text_len=%d status=%s", len(payload.text), parsed.get("overall_status", "SAFE"))
+
     return {
         "status": "ok",
         "text": payload.text,
@@ -799,8 +924,13 @@ async def ai_parse_command(payload: NLPParseIn) -> Dict[str, Any]:
 
 
 @app.post("/api/ai/motor-predict")
-async def api_motor_predict(payload: MotorPredictIn, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return await ai_predict_motor(payload, db)
+async def api_motor_predict(
+    payload: MotorPredictIn,
+    db: Session = Depends(get_db),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    return await ai_predict_motor(payload, db, x_api_key, x_robot_id)
 
 
 @app.post("/api/ai/nlp-parse")
@@ -809,13 +939,21 @@ async def api_nlp_parse(payload: NLPParseIn) -> Dict[str, Any]:
 
 
 @app.post("/api/command")
-async def api_command(payload: CommandIn) -> Dict[str, Any]:
-    return await post_command(payload)
+async def api_command(
+    payload: CommandIn,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    return await post_command(payload, x_api_key, x_robot_id)
 
 
 @app.post("/api/ai/vision-analyze")
-async def api_vision_analyze(payload: VisionAnalyzeIn) -> Dict[str, Any]:
-    validate_handshake(payload.robot_id, payload.secret_key)
+async def api_vision_analyze(
+    payload: VisionAnalyzeIn,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_robot_id: Optional[str] = Header(default=None, alias="X-Robot-Id"),
+) -> Dict[str, Any]:
+    validate_request_auth(payload.robot_id, payload.secret_key, x_api_key, x_robot_id)
 
     polygon = payload.roi_polygon
     if not polygon:
@@ -865,6 +1003,42 @@ async def api_vision_analyze(payload: VisionAnalyzeIn) -> Dict[str, Any]:
         "robot_id": payload.robot_id,
         **summary,
     }
+
+
+@app.post("/api/ai/strategy-optimize")
+async def api_strategy_optimize(payload: StrategyOptimizeIn) -> Dict[str, Any]:
+    if strategy_optimizer is None:
+        raise HTTPException(status_code=503, detail="Strategy optimizer module unavailable")
+
+    result = strategy_optimizer.optimize_strategy(payload.model_dump())
+    logger.info(
+        "Strategy optimize triggered tire_age=%.2f temp=%.2f fuel=%.2f pit_lap=%s",
+        payload.tire_age,
+        payload.track_temp,
+        payload.fuel_load,
+        result.get("best_strategy", {}).get("pit_lap"),
+    )
+    insight = {
+        "id": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "type": "ai_insight",
+        "timestamp": now_iso(),
+        "robot_id": "fleet-strategy",
+        "insight": {
+            "source": "strategy_optimizer",
+            "severity": "info",
+            "message": f"Best pit lap {result['best_strategy']['pit_lap']} with expected time {result['best_strategy']['expected_race_time']}s",
+        },
+    }
+    ai_insights.append(insight)
+    if len(ai_insights) > 500:
+        del ai_insights[:-500]
+    await manager.broadcast(insight)
+    return result
+
+
+@app.post("/api/strategy/optimize")
+async def api_strategy_optimize_alias(payload: StrategyOptimizeIn) -> Dict[str, Any]:
+    return await api_strategy_optimize(payload)
 
 
 @app.get("/health")

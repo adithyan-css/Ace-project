@@ -8,11 +8,12 @@ import MapView from './MapView'
 import AIInsights from './AIInsights'
 import AlertsPanel from './AlertsPanel'
 import CommandTerminal from './CommandTerminal'
+import LiveHud from './LiveHud'
 import { useRobotStore } from '../store/useRobotStore'
 import { Zap, Battery, Thermometer, Activity, Compass } from 'lucide-react'
 
 const DashboardLayout = () => {
-  const { robots, selectedRobotId, isLoading, error } = useRobotStore()
+  const { robots, selectedRobotId, isLoading, error, driveMode, toggleDriveMode } = useRobotStore()
   const selectedRobot = robots.find((r) => r.id === selectedRobotId)
 
   const telemetryMetrics = [
@@ -69,9 +70,15 @@ const DashboardLayout = () => {
         <main className="flex-1 overflow-y-auto p-4 space-y-4">
           {isLoading && <div className="text-xs text-[#00F5FF] font-orbitron">LOADING FLEET DATA...</div>}
           {error && <div className="text-xs text-[#EF4444] font-orbitron">{error}</div>}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400 font-orbitron">CONTROL MODE</span>
+            <button onClick={toggleDriveMode} className="px-3 py-1 rounded-lg border border-[#00F5FF]/30 text-[#00F5FF] text-xs font-orbitron hover:bg-[#00F5FF]/10 transition-colors">
+              {driveMode}
+            </button>
+          </div>
 
           <motion.div
-            className="grid grid-cols-5 gap-4"
+            className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
@@ -85,23 +92,25 @@ const DashboardLayout = () => {
             ))}
           </motion.div>
 
-          <div className="grid grid-cols-12 gap-4">
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
             <motion.div
-              className="col-span-8 space-y-4"
+              className="xl:col-span-8 space-y-4"
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.2, duration: 0.5 }}
             >
               <ChartsPanel />
 
-              <div className="grid grid-cols-2 gap-4">
+              <LiveHud />
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <MapView />
                 <AIInsights />
               </div>
             </motion.div>
 
             <motion.div
-              className="col-span-4 space-y-4"
+              className="xl:col-span-4 space-y-4"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.3, duration: 0.5 }}

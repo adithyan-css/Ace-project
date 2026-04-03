@@ -29,6 +29,7 @@ const defaultRobot = (id, robotId) => ({
   },
   location: { lat: 0, lng: 0 },
   path: [],
+  visionBoxes: [],
   lastSeen: null,
 })
 
@@ -106,10 +107,14 @@ export const useRobotStore = create((set, get) => ({
   isLoading: false,
   error: null,
   ws: null,
+  reconnectTimer: null,
+  driveMode: 'MANUAL',
   terminalHistory: [
     { type: 'system', message: 'Mission Control v2.4.1 initialized', timestamp: new Date().toLocaleTimeString() },
     { type: 'system', message: 'Connecting to backend...', timestamp: new Date().toLocaleTimeString() },
   ],
+
+  toggleDriveMode: () => set((state) => ({ driveMode: state.driveMode === 'MANUAL' ? 'AUTONOMOUS' : 'MANUAL' })),
 
   selectRobot: (id) => {
     const state = get()
@@ -148,6 +153,7 @@ export const useRobotStore = create((set, get) => ({
           telemetry: toLocalTelemetry(telemetryPayload),
           location,
           path,
+          visionBoxes: telemetryPayload?.extra?.vision_boxes || robot.visionBoxes || [],
           lastSeen: telemetryPayload?.timestamp || new Date().toISOString(),
         }
       })
@@ -284,11 +290,17 @@ export const useRobotStore = create((set, get) => ({
 
   connectWebSocket: () => {
     const state = get()
-    if (state.ws && state.isConnected) {
+    if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
       return
     }
 
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer)
+      set({ reconnectTimer: null })
+    }
+
     const ws = new WebSocket(WS_URL)
+    set({ ws })
     ws.onopen = () => {
       set({ isConnected: true, error: null, ws })
       get().addTerminalLine({
@@ -375,17 +387,19 @@ export const useRobotStore = create((set, get) => ({
     }
 
     ws.onclose = () => {
-      set({ isConnected: false, ws: null })
+      const reconnectTimer = setTimeout(() => {
+        set({ reconnectTimer: null })
+        if (!get().isConnected) {
+          get().connectWebSocket()
+        }
+      }, 1500)
+
+      set((current) => ({ isConnected: false, ws: current.ws === ws ? null : current.ws, reconnectTimer }))
       get().addTerminalLine({
         type: 'warning',
         message: 'WebSocket disconnected. Reconnecting...',
         timestamp: new Date().toLocaleTimeString(),
       })
-      setTimeout(() => {
-        if (!get().isConnected) {
-          get().connectWebSocket()
-        }
-      }, 1500)
     }
 
     ws.onerror = () => {

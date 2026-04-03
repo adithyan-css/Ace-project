@@ -2,7 +2,7 @@ import argparse
 import json
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -14,6 +14,17 @@ selected_idx = -1
 log_path = "breach_log.jsonl"
 
 
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_log_ts(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def write_log(event_type, object_id, entered_at=None, exited_at=None, duration=None):
     payload = {
         "event": event_type,
@@ -21,7 +32,7 @@ def write_log(event_type, object_id, entered_at=None, exited_at=None, duration=N
         "entered_at": entered_at,
         "exited_at": exited_at,
         "duration_seconds": duration,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": now_utc().isoformat(),
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload) + "\n")
@@ -57,30 +68,35 @@ def calculate_fps(fps_times):
 
 
 def apply_entry_exit_logic(track_id, inside, active_inside):
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = now_utc().isoformat()
     if inside and track_id not in active_inside:
         active_inside[track_id] = now_iso
         write_log("ENTRY", track_id, entered_at=now_iso)
     elif (not inside) and track_id in active_inside:
         entered = active_inside.pop(track_id)
-        duration = (datetime.utcnow() - datetime.fromisoformat(entered)).total_seconds()
+        duration = (now_utc() - parse_log_ts(entered)).total_seconds()
         write_log("EXIT", track_id, entered_at=entered, exited_at=now_iso, duration=round(duration, 3))
+        return duration
+    return 0.0
 
 
 def close_active_tracks(active_inside):
+    total = 0.0
     for track_id, entered in list(active_inside.items()):
-        exited = datetime.utcnow().isoformat()
-        duration = (datetime.fromisoformat(exited) - datetime.fromisoformat(entered)).total_seconds()
+        exited = now_utc().isoformat()
+        duration = (parse_log_ts(exited) - parse_log_ts(entered)).total_seconds()
         write_log("EXIT", track_id, entered_at=entered, exited_at=exited, duration=round(duration, 3))
+        total += duration
+    return total
 
 
-def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
+def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None, event_callback=None):
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError("Could not open source")
 
     model = YOLO("yolov8n.pt")
-    interest_names = {"person", "bottle", "backpack"}
+    interest_names = {"person", "car", "truck", "bus", "motorcycle"}
     interest_ids = {idx for idx, name in model.names.items() if name in interest_names}
 
     if show_window:
@@ -88,6 +104,7 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
         cv2.setMouseCallback("ACE Vision Monitor", on_mouse)
 
     active_inside = {}
+    total_occupancy_seconds = 0.0
     latest_tracked = []
     frame_count = 0
     fps_times = deque(maxlen=30)
@@ -135,7 +152,7 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
                         zone_breach = True
 
                     track_id = int(boxes.id[i].item()) if has_ids else int(i)
-                    apply_entry_exit_logic(track_id, inside, active_inside)
+                    total_occupancy_seconds += apply_entry_exit_logic(track_id, inside, active_inside)
 
                     tracked.append(
                         {
@@ -155,9 +172,10 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
             for track_id in list(active_inside.keys()):
                 if track_id not in visible_ids:
                     entered = active_inside.pop(track_id)
-                    exited = datetime.utcnow().isoformat()
-                    duration = (datetime.fromisoformat(exited) - datetime.fromisoformat(entered)).total_seconds()
+                    exited = now_utc().isoformat()
+                    duration = (parse_log_ts(exited) - parse_log_ts(entered)).total_seconds()
                     write_log("EXIT", track_id, entered_at=entered, exited_at=exited, duration=round(duration, 3))
+                    total_occupancy_seconds += duration
 
         for d in latest_tracked:
             x1, y1, x2, y2 = d["xyxy"]
@@ -183,6 +201,33 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
         fps_times.append(time.time())
         fps = calculate_fps(fps_times)
 
+        if event_callback and run_inference:
+            detections = []
+            for d in latest_tracked:
+                x1, y1, x2, y2 = d["xyxy"]
+                detections.append(
+                    {
+                        "id": d["track_id"],
+                        "label": d["name"],
+                        "conf": round(d["conf"], 3),
+                        "x": x1,
+                        "y": y1,
+                        "w": max(0, x2 - x1),
+                        "h": max(0, y2 - y1),
+                        "inside": bool(d["inside"]),
+                    }
+                )
+            event_callback(
+                {
+                    "timestamp": now_utc().isoformat(),
+                    "fps": round(fps, 2),
+                    "zone_breach": bool(zone_breach),
+                    "polygon": [list(p) for p in roi_points],
+                    "detections": detections,
+                    "occupancy_seconds": round(total_occupancy_seconds, 3),
+                }
+            )
+
         hud_h = 48
         hud = frame.copy()
         cv2.rectangle(hud, (0, 0), (frame.shape[1], hud_h), (15, 15, 15), -1)
@@ -197,6 +242,7 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
         fps_text = f"FPS: {fps:.1f}"
         fps_size = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
         cv2.putText(frame, fps_text, (frame.shape[1] - fps_size[0] - 12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"Occupancy: {total_occupancy_seconds:.1f}s", (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
         cv2.putText(frame, "Drag corners to edit ROI | Q to quit", (12, frame.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 2, cv2.LINE_AA)
 
@@ -208,11 +254,17 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None):
         if max_frames is not None and frame_count >= max_frames:
             break
 
-    close_active_tracks(active_inside)
+    total_occupancy_seconds += close_active_tracks(active_inside)
     cap.release()
     if show_window:
         cv2.destroyAllWindows()
     print(f"Logs saved to {log_path}")
+    print(f"Total occupancy time: {round(total_occupancy_seconds, 3)} seconds")
+    return {
+        "status": "ok",
+        "total_occupancy_seconds": round(total_occupancy_seconds, 3),
+        "frames_processed": frame_count,
+    }
 
 
 def parse_source(value):
