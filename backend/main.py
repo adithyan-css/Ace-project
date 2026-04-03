@@ -210,16 +210,16 @@ async def lifespan(app: FastAPI):
     model_file = artifacts_dir / "motor_lstm.pt"
     if not model_file.exists():
         print("\n" + "=" * 72)
-        print("⚠️  WARNING: motor_lstm.pt not found.")
+        print("WARNING: motor_lstm.pt not found.")
         print("Motor predictions will use heuristic fallback.")
         print("Run: python ai_ml/module2/train_and_save.py")
         print("Then restart the backend.")
         print("=" * 72 + "\n")
     elif motor_service.model is not None:
-        print("✅ Motor LSTM model loaded successfully")
+        print("Motor LSTM model loaded successfully")
     else:
         print("\n" + "=" * 72)
-        print("⚠️  WARNING: motor_lstm.pt exists but could not be loaded.")
+        print("WARNING: motor_lstm.pt exists but could not be loaded.")
         print("Motor predictions will use heuristic fallback.")
         print("Run: python ai_ml/module2/train_and_save.py")
         print("Then restart the backend.")

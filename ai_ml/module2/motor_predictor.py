@@ -61,7 +61,7 @@ class LSTMRegressor(nn.Module):
 def bar(prob):
     blocks = 20
     on = int(round(prob * blocks))
-    return "[" + "█" * on + "░" * (blocks - on) + "]"
+    return "[" + "#" * on + "-" * (blocks - on) + "]"
 
 
 def synth_row(mode: str, step: int) -> np.ndarray:
@@ -199,7 +199,7 @@ def run_live_demo(model, scaler, seq_len=30):
             window_norm = scaler.transform(window)
             x_in = torch.tensor(window_norm[None, :, :], dtype=torch.float32)
             prob = float(model(x_in).item())
-            label = "🚨 FAILURE ALERT" if prob > 0.5 else "✅ Normal"
+            label = "FAILURE ALERT" if prob > 0.5 else "NORMAL"
             phase = mode.ljust(16)
             print(f"  [{phase}] Failure Prob: {bar(prob)} {prob * 100:5.1f}%  {label}")
 

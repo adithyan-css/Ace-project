@@ -92,6 +92,7 @@ def close_active_tracks(active_inside):
 
 def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None, event_callback=None):
     cap = cv2.VideoCapture(source)
+    time.sleep(2)
     if not cap.isOpened():
         raise RuntimeError("Could not open source")
 
@@ -268,7 +269,7 @@ def run_monitor(source=0, frame_skip=2, show_window=True, max_frames=None, event
 
 
 def parse_source(value):
-    return 0 if str(value).isdigit() else value
+    return int(value) if str(value).isdigit() else value
 
 
 def main():

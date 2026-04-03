@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 from urllib import request, error
 
@@ -144,6 +144,56 @@ def calculate_overall_status(issues: List[Dict[str, str]]) -> str:
     return "CAUTION"
 
 
+def _extract_json_object(text: str) -> Dict[str, object]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise json.JSONDecodeError("No JSON object found", cleaned, 0)
+    return json.loads(cleaned[start : end + 1])
+
+
+def call_gemini_parser(text: str, api_key: str) -> Dict[str, object]:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    prompt = (
+        "Return strictly valid JSON with keys: issues, directives, overall_status. "
+        "issues: list of {component, description, severity}. "
+        "directives: list of {action, target, urgency}. "
+        "overall_status: SAFE|CAUTION|ALERT|EMERGENCY. "
+        "Do not include markdown or code fences.\n\n"
+        f"Transcript: {text}"
+    )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    return _extract_json_object(content)
+
+
 # Parse JSON response from OpenAI endpoint when available.
 def call_openai_parser(text: str, api_key: str) -> Dict[str, object]:
     url = "https://api.openai.com/v1/chat/completions"
@@ -181,12 +231,28 @@ def call_openai_parser(text: str, api_key: str) -> Dict[str, object]:
     return json.loads(content)
 
 
-# Parse transcript using optional OpenAI path with safe rule-based fallback.
+# Parse transcript using optional Gemini/OpenAI paths with safe rule-based fallback.
 def parse_transcript(text: str) -> dict:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if api_key:
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+    if gemini_key:
         try:
-            parsed = call_openai_parser(text, api_key)
+            parsed = call_gemini_parser(text, gemini_key)
+            issues = parsed.get("issues", [])
+            directives = parsed.get("directives", [])
+            overall = parsed.get("overall_status", "SAFE")
+            return {
+                "issues": issues,
+                "directives": directives,
+                "overall_status": overall,
+                "mode": "gemini",
+            }
+        except (error.URLError, error.HTTPError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
+            pass
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        try:
+            parsed = call_openai_parser(text, openai_key)
             issues = parsed.get("issues", [])
             directives = parsed.get("directives", [])
             overall = parsed.get("overall_status", "SAFE")
@@ -220,35 +286,35 @@ def parse_transcript(text: str) -> dict:
 
 # Render output in a readable incident-console style.
 def pretty_print(text: str, result: dict) -> None:
-    severity_icon = {"low": "🟢", "medium": "🟠", "high": "🔴"}
-    urgency_icon = {"low": "🕐", "medium": "⏰", "high": "🚨"}
+    severity_label = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}
+    urgency_label = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}
     overall_icon = {
-        "SAFE": "✅",
-        "CAUTION": "⚠️",
-        "ALERT": "🔴",
-        "EMERGENCY": "🚨",
+        "SAFE": "SAFE",
+        "CAUTION": "CAUTION",
+        "ALERT": "ALERT",
+        "EMERGENCY": "EMERGENCY",
     }
 
-    print("─" * 60)
-    print(f"📻 TRANSCRIPT: '{text}'")
+    print("-" * 60)
+    print(f"TRANSCRIPT: '{text}'")
     print(f"Mode: {result.get('mode', 'rule-based')}")
-    print(f"Overall: {overall_icon.get(result['overall_status'], '✅')} {result['overall_status']}")
+    print(f"Overall: {overall_icon.get(result['overall_status'], 'SAFE')}")
 
     print("ISSUES DETECTED:")
     if result["issues"]:
         for item in result["issues"]:
-            icon = severity_icon.get(item["severity"], "🟢")
-            print(f"  {icon} {item['component']}: {item['description']} (severity={item['severity']})")
+            label = severity_label.get(item["severity"], "LOW")
+            print(f"  [{label}] {item['component']}: {item['description']} (severity={item['severity']})")
     else:
-        print("  🟢 None")
+        print("  [NONE]")
 
     print("DIRECTIVES:")
     if result["directives"]:
         for item in result["directives"]:
-            icon = urgency_icon.get(item["urgency"], "🕐")
-            print(f"  {icon} {item['action']} -> {item['target']} (urgency={item['urgency']})")
+            label = urgency_label.get(item["urgency"], "LOW")
+            print(f"  [{label}] {item['action']} -> {item['target']} (urgency={item['urgency']})")
     else:
-        print("  🕐 None")
+        print("  [NONE]")
 
 
 # Print Jetson deployment options requested in the evaluation prompt.
@@ -279,7 +345,7 @@ if __name__ == "__main__":
         pretty_print(transcript, result)
         all_results.append(
             {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "transcript": transcript,
                 "result": result,
             }
