@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+ultralytics
+opencv-python
+torch
+numpy
+pandas
+scikit-learn
+matplotlib
+requests
